@@ -36,7 +36,9 @@ The reference the code is built from. If the code and this file disagree, this f
 A power triggers when a **Jack** or **Queen** goes into the middle pile on your turn, by any turn action:
 - you throw the drawn card,
 - it is the card you swapped out of your hand, or
-- you throw a matching **pair** of Jacks or Queens (the power is used **once** for the pair).
+- you throw a matching **pair** of Jacks or Queens: the power is used **twice** (two swaps, or two peeks).
+
+The player may skip the power (for a pair, skipping gives up both uses).
 
 - **Jack** — swap one of your cards with one card of another player, **without looking** at either.
 - **Queen** — look at **one card anywhere** on the table (yours or another player's).
@@ -51,6 +53,7 @@ Cards thrown by **cutting** do not trigger powers.
 - Several players can cut in the same window, and a player may cut more than once.
 - **Wrong cut:** the card goes back to your hand **and** you take a penalty card.
 - The order of cuts is the order in which they **reach the server** (network timing decides races).
+- If a Jack or Queen power is pending, the cut window opens only **after** the power has been used (or skipped).
 - When the window closes, play continues with the player **next to whoever threw the last card** (the last successful cutter, or the original thrower if nobody cut).
 
 ## End of a round
@@ -59,7 +62,14 @@ A round ends when:
 - a player has **no cards left** (they win the round instantly, whether they emptied their hand on their turn or by cutting), or
 - a player calls **Pablo**. Everyone reveals their cards immediately.
 
-If the deck runs out, the middle pile, except its top card, is shuffled to become the new deck.
+If the deck runs out, the middle pile, except its top card, is shuffled to become the new deck. In the rare case where there is still nothing to draw, the player must throw a pair or call Pablo.
+
+## Disqualification
+
+- A player who ends up with **more than 12 cards** (after a penalty card) is **disqualified for the rest of the round**.
+- Their cards are shuffled back into the deck and play continues without them.
+- Their score for that round is **+50**. They play again normally in the next round.
+- If only one player is left in the round, that player wins the round (−5).
 
 ## Scoring
 

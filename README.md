@@ -23,6 +23,14 @@ tests/     automated tests
 
 *(Filled in as the server and client are built.)*
 
+## Tests
+
+From the project folder:
+
+```bash
+python -m unittest -v
+```
+
 ## Configuration
 
 All ports and game settings live in [`common/config.py`](common/config.py) and can be overridden with environment variables:

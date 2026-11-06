@@ -31,6 +31,8 @@ DEFAULT_ROOM_SIZE = 3
 # --- Game rules (see RULES.md) -------------------------------------------------
 CARDS_PER_PLAYER = 4
 INITIAL_PEEK = 2             # cards each player may look at when a round starts
+MAX_HAND_SIZE = 12           # a player with more cards than this is disqualified for the round
+DISQUALIFICATION_PENALTY = 50  # round score of a disqualified player
 CUT_WINDOW_SECONDS = 3.0     # pause after every throw during which anyone may cut
 TURN_TIMEOUT_SECONDS = 60.0  # a player who does nothing for this long is skipped
 TARGET_SCORE = 100           # the match ends when someone reaches this
