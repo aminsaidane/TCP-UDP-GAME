@@ -27,6 +27,7 @@ HEARTBEAT_TIMEOUT = 5.0    # seconds of silence before a player counts as discon
 # --- Rooms -------------------------------------------------------------------
 ALLOWED_ROOM_SIZES = (3, 4)  # the room creator picks one of these
 DEFAULT_ROOM_SIZE = 3
+MIN_PLAYERS_TO_START = 3     # the host's Start button is enabled from this many players
 
 # --- Game rules (see RULES.md) -------------------------------------------------
 CARDS_PER_PLAYER = 4

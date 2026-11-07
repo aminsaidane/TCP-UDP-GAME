@@ -4,6 +4,7 @@ CS411 Project 2. A real-time multiplayer version of **Pablo**, a memory card gam
 
 - **1 server + 3 or 4 clients**, each on its own PC.
 - Full rules: [RULES.md](RULES.md).
+- Every network message, and why it uses TCP or UDP: [PROTOCOL.md](PROTOCOL.md).
 
 ## Project layout
 
