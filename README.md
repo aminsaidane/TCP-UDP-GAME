@@ -22,7 +22,24 @@ tests/     automated tests
 
 ## Running
 
-*(Filled in as the server and client are built.)*
+### Server
+
+On the server PC, from the project folder:
+
+```bash
+python -m server.main
+```
+
+It listens on every network interface, TCP port 5000, and prints a log line for every connection, login and disconnection. Stop it with Ctrl+C.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--port` | `5000` | TCP port |
+| `--users-file` | `users.json` | where accounts are saved (passwords are stored as salted hashes) |
+
+### Client
+
+*(Coming in Step 5.)*
 
 ## Tests
 

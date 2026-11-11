@@ -4,3 +4,5 @@ __pycache__/
 venv/
 *.pcapng
 .pytest_cache/
+users.json
+users.json.tmp
