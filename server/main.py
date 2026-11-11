@@ -1,4 +1,4 @@
-"""The Pablo server (TCP part): accounts, login, lobby and rooms.
+"""The Pablo server (TCP part): accounts, login, lobby, rooms and games.
 
 Run it with:   python -m server.main            (listens on every interface, port 5000)
                python -m server.main --port 6000 --users-file accounts.json
@@ -17,6 +17,7 @@ import threading
 from common import config
 from common import protocol as proto
 from server.accounts import AccountError, AccountStore
+from server.game import ACTIONS, GameRoom
 from server.lobby import Lobby, LobbyError
 
 log = logging.getLogger("pablo")
@@ -73,7 +74,8 @@ class PabloServer:
         self.accounts = AccountStore(users_file)
         self.sessions = {}                  # username -> Session (logged-in players only)
         self.lobby = Lobby()
-        self.lock = threading.Lock()        # protects self.sessions and self.lobby
+        self.games = {}                     # room id -> GameRoom
+        self.lock = threading.Lock()        # protects self.sessions, self.lobby and self.games
         self.listener = None
         self.running = False
         self.handlers = {
@@ -86,6 +88,8 @@ class PabloServer:
             "leave_room": self.on_leave_room,
             "start_game": self.on_start_game,
         }
+        for action in ACTIONS:              # peek, draw, swap... all go to the game
+            self.handlers[action] = self.on_game_action
 
     # ------------------------------------------------------------------ lifecycle
     def start(self):
@@ -222,6 +226,13 @@ class PabloServer:
         for session, msg in outbox:
             session.send(msg)
 
+    def _deliver_named(self, outbox):
+        """Same as _deliver, for (username, message) pairs produced by a GameRoom."""
+        for name, msg in outbox:
+            session = self.sessions.get(name)
+            if session:
+                session.send(msg)
+
     def _lobby_sessions(self):
         """Logged-in players who are not in a room: they see the room list."""
         return [s for name, s in self.sessions.items() if self.lobby.room_of(name) is None]
@@ -241,6 +252,8 @@ class PabloServer:
         room, deleted = self.lobby.leave(username)
         log.info("'%s' left room %d '%s'%s", username, room.id, room.name,
                  " (room closed)" if deleted else "")
+        if deleted and room.id in self.games:
+            self.games.pop(room.id).stop()
         outbox = [] if deleted else self._room_update(room)
         return outbox + self._rooms_broadcast()
 
@@ -296,9 +309,23 @@ class PabloServer:
             else:
                 log.info("'%s' started the game in room %d '%s' with %s",
                          session.username, room.id, room.name, ", ".join(room.players))
-                # The cards are dealt in Step 6; for now the room switches to "playing".
                 outbox = self._room_update(room) + self._rooms_broadcast()
+                game = GameRoom(room.id, room.players, self.lock, self._deliver_named)
+                self.games[room.id] = game
+                self._deliver(outbox)
+                outbox = []
+                self._deliver_named(game.start())
             self._deliver(outbox)
+
+    # ------------------------------------------------------------------ game handler
+    def on_game_action(self, session, msg):
+        with self.lock:
+            room = self.lobby.room_of(session.username)
+            game = self.games.get(room.id) if room else None
+            if game is None:
+                session.send(proto.error(msg["type"], "you are not in a game"))
+                return
+            self._deliver_named(game.act(session.username, msg))
 
 
 def main():

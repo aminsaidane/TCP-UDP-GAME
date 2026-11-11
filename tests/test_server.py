@@ -174,7 +174,8 @@ class MessageHandlingTests(ServerTestCase):
 
     def test_feature_not_built_yet(self):
         c = self.logged_in("amin")
-        self.assertEqual(c.request("draw")["message"], "not available yet")
+        self.assertEqual(c.request("cut", slot=0)["message"], "not available yet")
+        self.assertEqual(c.request("draw")["message"], "you are not in a game")
 
 
 class ConcurrencyTests(ServerTestCase):

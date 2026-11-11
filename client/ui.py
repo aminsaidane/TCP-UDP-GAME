@@ -23,6 +23,8 @@ _fonts = {}
 def font(size, bold=False):
     key = (size, bold)
     if key not in _fonts:
+        if not pygame.font.get_init():
+            pygame.font.init()
         f = pygame.font.Font(None, size)
         f.set_bold(bold)
         _fonts[key] = f
@@ -139,3 +141,77 @@ def focus_next(inputs):
     for f in inputs:
         f.focused = False
     inputs[(current + 1) % len(inputs)].focused = True
+
+
+# ---------------------------------------------------------------------- cards
+CARD_RED = (190, 40, 50)
+CARD_BLACK = (25, 25, 30)
+BACK = (122, 32, 42)
+BACK_LINE = (160, 60, 68)
+SUIT_WORDS = {"H": "Hearts", "D": "Diamonds", "C": "Clubs", "S": "Spades"}
+RANK_WORDS = {"J": "Jack", "Q": "Queen", "K": "King"}
+
+
+def card_name(code):
+    """'QS' -> 'Queen of Spades' (used in the game log; fonts lack suit symbols)."""
+    rank, suit = code[:-1], code[-1]
+    return f"{RANK_WORDS.get(rank, rank)} of {SUIT_WORDS[suit]}"
+
+
+def draw_suit(surface, suit, center, size, color):
+    """Suits are drawn as shapes, so they look the same on every PC whatever fonts it has."""
+    x, y = center
+    r = max(2, size // 4)
+    if suit == "D":
+        pygame.draw.polygon(surface, color, [(x, y - size // 2), (x + size // 2.6, y),
+                                             (x, y + size // 2), (x - size // 2.6, y)])
+    elif suit == "H":
+        pygame.draw.circle(surface, color, (x - r, y - r // 2), r)
+        pygame.draw.circle(surface, color, (x + r, y - r // 2), r)
+        pygame.draw.polygon(surface, color, [(x - 2 * r, y - r // 3), (x + 2 * r, y - r // 3), (x, y + size // 2)])
+    elif suit == "S":
+        pygame.draw.circle(surface, color, (x - r, y + r // 3), r)
+        pygame.draw.circle(surface, color, (x + r, y + r // 3), r)
+        pygame.draw.polygon(surface, color, [(x - 2 * r, y + r // 4), (x + 2 * r, y + r // 4), (x, y - size // 2)])
+        pygame.draw.polygon(surface, color, [(x, y + r // 2), (x - r, y + size // 2), (x + r, y + size // 2)])
+    elif suit == "C":
+        pygame.draw.circle(surface, color, (x, y - r), r)
+        pygame.draw.circle(surface, color, (x - r - 1, y + r // 2), r)
+        pygame.draw.circle(surface, color, (x + r + 1, y + r // 2), r)
+        pygame.draw.polygon(surface, color, [(x, y), (x - r, y + size // 2), (x + r, y + size // 2)])
+
+
+def draw_card(surface, rect, code=None, selected=False, glow=None):
+    """A card: face-up if `code` is given ('7H'), otherwise its back."""
+    rect = pygame.Rect(rect)
+    radius = max(4, rect.w // 10)
+    pygame.draw.rect(surface, FELT_DARK, rect.move(0, 3), border_radius=radius)
+    if code:
+        pygame.draw.rect(surface, WHITE, rect, border_radius=radius)
+        rank, suit = code[:-1], code[-1]
+        color = CARD_RED if suit in "HD" else CARD_BLACK
+        size = max(16, rect.h // 3)
+        text(surface, rank, (rect.x + rect.w // 10, rect.y + rect.h // 18), size=size, color=color, bold=True)
+        draw_suit(surface, suit, (rect.centerx, rect.centery + rect.h // 10), rect.w // 2, color)
+        if code == "KH":   # the King of Hearts is worth 0: flag it so players notice
+            text(surface, "0", (rect.right - rect.w // 6, rect.bottom - rect.h // 5), size=size // 2,
+                 color=color, bold=True, center=True)
+    else:
+        pygame.draw.rect(surface, BACK, rect, border_radius=radius)
+        inner = rect.inflate(-rect.w // 5, -rect.w // 5)
+        pygame.draw.rect(surface, BACK_LINE, inner, width=2, border_radius=radius)
+        step = max(6, rect.w // 6)
+        clip = surface.get_clip()
+        surface.set_clip(inner)
+        for i in range(-inner.h, inner.w, step):
+            pygame.draw.line(surface, BACK_LINE, (inner.x + i, inner.y), (inner.x + i + inner.h, inner.bottom), 1)
+        surface.set_clip(clip)
+    if selected:
+        pygame.draw.rect(surface, BRASS, rect.inflate(8, 8), width=4, border_radius=radius + 3)
+    elif glow:
+        pygame.draw.rect(surface, glow, rect.inflate(6, 6), width=3, border_radius=radius + 3)
+
+
+def empty_slot(surface, rect):
+    rect = pygame.Rect(rect)
+    pygame.draw.rect(surface, FELT_LIGHT, rect, width=2, border_radius=max(4, rect.w // 10))

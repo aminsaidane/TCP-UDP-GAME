@@ -3,7 +3,7 @@
 Run it with:   python -m client.main
                python -m client.main --server 192.168.1.12
 
-Screens: Login -> Lobby -> Room (-> game table, Step 6).
+Screens: Login -> Lobby -> Room -> Table (the game).
 The window loop runs at 30 frames per second: handle mouse/keyboard,
 handle the messages the network thread received, draw.
 """
@@ -15,6 +15,7 @@ from common import config
 from common import protocol as proto
 from client import ui
 from client.network import NetworkClient, parse_address
+from client.table import TableScreen
 
 WIDTH, HEIGHT = 1000, 680
 FPS = 30
@@ -246,7 +247,7 @@ class RoomScreen(Screen):
         self.start_btn.visible = is_host and room["status"] == "waiting"
         self.start_btn.enabled = room["can_start"]
         if room["status"] == "playing":
-            status = "The game is starting... (the card table arrives in Step 6)"
+            status = "The game is starting..."
         elif is_host:
             if not room["can_start"]:
                 status = f"Waiting for at least {config.MIN_PLAYERS_TO_START} players..."
@@ -276,7 +277,8 @@ class App:
         self.rooms = []
         self.room = None
         self.pending_login = None       # credentials to log in with right after registering
-        self.screens = {"login": LoginScreen(self), "lobby": LobbyScreen(self), "room": RoomScreen(self)}
+        self.screens = {"login": LoginScreen(self), "lobby": LobbyScreen(self), "room": RoomScreen(self),
+                        "table": TableScreen(self)}
         self.screen = self.screens["login"]
 
     def go(self, name):
@@ -329,9 +331,21 @@ class App:
             self.go("room")
         elif kind == "room_update":
             self.room = msg["room"]
+            table = self.screens["table"]
+            if self.screen is table and table.state and len(msg["room"]["players"]) < len(
+                    table.state["players"]):
+                self.screen.show("A player left the room (handled in Step 10)")
         elif kind == "room_left":
             self.room = None
+            self.screens["table"].state = None
             self.go("lobby")
+        elif kind == "game_start":
+            self.screens["table"].on_game_start(msg)
+            self.go("table")
+        elif kind == "state":
+            self.screens["table"].on_state(msg["state"])
+        elif kind == "event":
+            self.screens["table"].on_event(msg["event"])
         elif kind == "error":
             self.pending_login = None
             self.screen.show(msg["message"])

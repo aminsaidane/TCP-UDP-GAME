@@ -48,6 +48,16 @@ python -m client.main --server 192.168.1.12   # or pre-fill it
 
 Click **Register** the first time (it creates the account and logs you in), **Log in** afterwards. In the lobby, create a room (3 or 4 players) or join one; the host starts the game once at least 3 players are in.
 
+### Controls at the table
+
+| When | Do |
+|---|---|
+| Start of a round | click 2 of your cards: they are shown for 5 seconds, memorise them |
+| Your turn | **Draw**, or **Throw a pair** then click the 2 cards |
+| After drawing | **Throw it**, or click one of your cards to swap it with the drawn card |
+| Jack power | click one of your cards and one opponent card (or **Skip power**) |
+| Queen power | click any card to see it for 3 seconds (or **Skip power**) |
+
 ## Tests
 
 From the project folder:

@@ -127,6 +127,36 @@ class ScreenFlowTests(LiveServerCase):
         amin.screen.start()
         self.pump(amin, sara, omar, until=lambda: omar.room["status"] == "playing")
 
+    def test_game_table(self):
+        amin, sara, omar = self.app("amin"), self.app("sara"), self.app("omar")
+        amin.screen.create()
+        self.pump(amin, until=lambda: amin.room)
+        for other in (sara, omar):
+            other.send(p.make("join_room", room_id=amin.room["id"]))
+            self.pump(amin, sara, omar, until=lambda o=other: o.room)
+        amin.screen.start()
+        self.pump(amin, sara, omar, until=lambda: all(type(a.screen).__name__ == "TableScreen"
+                                                      and a.screen.state for a in (amin, sara, omar)))
+        table = amin.screen
+        self.assertEqual(table.state["phase"], "peek")
+        # click 2 of my own cards -> peek -> they are shown face-up for a few seconds
+        table.click_card("amin", 0)
+        table.click_card("amin", 3)
+        self.pump(amin, until=lambda: table._card_shown("amin", 0) and table._card_shown("amin", 3))
+        self.assertIsNone(table._card_shown("amin", 1))
+        self.assertIsNone(sara.screen._card_shown("amin", 0))      # sara never sees amin's cards
+        for a in (sara, omar):
+            a.screen.click_card(a.username, 1)
+            a.screen.click_card(a.username, 2)
+        self.pump(amin, sara, omar, until=lambda: table.state["phase"] == "turn")
+        # amin's turn: draw shows the card to amin only
+        amin.send(p.make("draw"))
+        self.pump(amin, sara, omar, until=lambda: sara.screen.state["holding_drawn"])
+        self.pump(amin, until=lambda: table.state["drawn"])
+        self.assertIsNone(sara.screen.state["drawn"])
+        self.assertIn("You drew a card:", " ".join(table.log))
+        self.assertIn("amin drew a card", " ".join(sara.screen.log))
+
     def test_wrong_password_shows_error(self):
         from client.main import App
         self.app("amin").logout()
