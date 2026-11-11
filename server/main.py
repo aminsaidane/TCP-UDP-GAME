@@ -1,4 +1,4 @@
-"""The Pablo server (TCP part): accounts and login.
+"""The Pablo server (TCP part): accounts, login, lobby and rooms.
 
 Run it with:   python -m server.main            (listens on every interface, port 5000)
                python -m server.main --port 6000 --users-file accounts.json
@@ -16,6 +16,7 @@ import threading
 from common import config
 from common import protocol as proto
 from server.accounts import AccountError, AccountStore
+from server.lobby import Lobby, LobbyError
 
 log = logging.getLogger("pablo")
 
@@ -48,13 +49,19 @@ class PabloServer:
         self.host, self.port = host, port
         self.accounts = AccountStore(users_file)
         self.sessions = {}                  # username -> Session (logged-in players only)
-        self.lock = threading.Lock()        # protects self.sessions
+        self.lobby = Lobby()
+        self.lock = threading.Lock()        # protects self.sessions and self.lobby
         self.listener = None
         self.running = False
         self.handlers = {
             "register": self.on_register,
             "login": self.on_login,
             "logout": self.on_logout,
+            "list_rooms": self.on_list_rooms,
+            "create_room": self.on_create_room,
+            "join_room": self.on_join_room,
+            "leave_room": self.on_leave_room,
+            "start_game": self.on_start_game,
         }
 
     # ------------------------------------------------------------------ lifecycle
@@ -135,9 +142,13 @@ class PabloServer:
 
     def _disconnect(self, session: Session):
         if session.username:
+            outbox = []
             with self.lock:
                 if self.sessions.get(session.username) is session:
                     del self.sessions[session.username]
+                    if self.lobby.room_of(session.username):
+                        outbox = self._leave_room(session.username)
+            self._deliver(outbox)
             log.info("%s disconnected", session)
         else:
             log.info("%s disconnected (not logged in)", session.addr)
@@ -176,6 +187,95 @@ class PabloServer:
     def on_logout(self, session, msg):
         log.info("%s logged out", session)
         return False   # closes the connection; _disconnect does the cleanup
+
+
+    # ------------------------------------------------------------------ lobby helpers
+    # Lobby changes happen while holding self.lock; the messages they produce are
+    # collected in an "outbox" and sent after the lock is released, so a slow
+    # client can never hold up the whole server.
+
+    def _deliver(self, outbox):
+        for session, msg in outbox:
+            session.send(msg)
+
+    def _lobby_sessions(self):
+        """Logged-in players who are not in a room: they see the room list."""
+        return [s for name, s in self.sessions.items() if self.lobby.room_of(name) is None]
+
+    def _room_sessions(self, room, exclude=None):
+        return [self.sessions[p] for p in room.players if p in self.sessions and p != exclude]
+
+    def _rooms_broadcast(self):
+        msg = proto.make("rooms", rooms=self.lobby.list())
+        return [(s, msg) for s in self._lobby_sessions()]
+
+    def _room_update(self, room, exclude=None):
+        msg = proto.make("room_update", room=room.to_dict())
+        return [(s, msg) for s in self._room_sessions(room, exclude)]
+
+    def _leave_room(self, username):
+        room, deleted = self.lobby.leave(username)
+        log.info("'%s' left room %d '%s'%s", username, room.id, room.name,
+                 " (room closed)" if deleted else "")
+        outbox = [] if deleted else self._room_update(room)
+        return outbox + self._rooms_broadcast()
+
+    # ------------------------------------------------------------------ lobby handlers
+    def on_list_rooms(self, session, msg):
+        with self.lock:
+            rooms = self.lobby.list()
+        session.send(proto.make("rooms", rooms=rooms))
+
+    def on_create_room(self, session, msg):
+        with self.lock:
+            try:
+                room = self.lobby.create(session.username, msg["name"], msg["size"])
+            except LobbyError as exc:
+                outbox = [(session, proto.error("create_room", str(exc)))]
+            else:
+                log.info("'%s' created room %d '%s' (max %d players)",
+                         session.username, room.id, room.name, room.size)
+                outbox = [(session, proto.make("room_joined", room=room.to_dict()))]
+                outbox += self._rooms_broadcast()
+        self._deliver(outbox)
+
+    def on_join_room(self, session, msg):
+        with self.lock:
+            try:
+                room = self.lobby.join(session.username, msg["room_id"])
+            except LobbyError as exc:
+                outbox = [(session, proto.error("join_room", str(exc)))]
+            else:
+                log.info("'%s' joined room %d '%s' (%d/%d)", session.username, room.id,
+                         room.name, len(room.players), room.size)
+                outbox = [(session, proto.make("room_joined", room=room.to_dict()))]
+                outbox += self._room_update(room, exclude=session.username)
+                outbox += self._rooms_broadcast()
+        self._deliver(outbox)
+
+    def on_leave_room(self, session, msg):
+        with self.lock:
+            try:
+                outbox = self._leave_room(session.username)
+            except LobbyError as exc:
+                outbox = [(session, proto.error("leave_room", str(exc)))]
+            else:
+                # the player is back in the lobby: confirm first, then the room list
+                outbox = [(session, proto.make("room_left"))] + outbox
+        self._deliver(outbox)
+
+    def on_start_game(self, session, msg):
+        with self.lock:
+            try:
+                room = self.lobby.start(session.username)
+            except LobbyError as exc:
+                outbox = [(session, proto.error("start_game", str(exc)))]
+            else:
+                log.info("'%s' started the game in room %d '%s' with %s",
+                         session.username, room.id, room.name, ", ".join(room.players))
+                # The cards are dealt in Step 6; for now the room switches to "playing".
+                outbox = self._room_update(room) + self._rooms_broadcast()
+        self._deliver(outbox)
 
 
 def main():
