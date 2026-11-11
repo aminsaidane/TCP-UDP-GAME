@@ -312,6 +312,23 @@ class LobbyTests(ServerTestCase):
         self.assertEqual(sorted(results.values()), ["error", "room_joined", "room_joined", "room_joined"])
         self.assertEqual(len(self.amin.request("list_rooms")["rooms"][0]["players"]), 4)
 
+    def test_room_updates_arrive_in_order(self):
+        """Regression: two joins at the same moment must not leave the host with a stale room."""
+        for _ in range(20):
+            room_id = self.amin.request("create_room", name="Order", size=3)["room"]["id"]
+            threads = [threading.Thread(target=c.request, args=("join_room",), kwargs={"room_id": room_id})
+                       for c in (self.sara, self.omar)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.amin.expect("room_update")
+            last = self.amin.expect("room_update")["room"]       # the 2nd update must be the newest
+            self.assertEqual(len(last["players"]), 3)
+            for c in (self.sara, self.omar, self.amin):
+                c.request("leave_room")
+            self.amin.inbox.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

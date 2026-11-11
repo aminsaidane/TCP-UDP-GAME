@@ -9,6 +9,7 @@ affects its own thread.
 """
 import argparse
 import logging
+import queue
 import secrets
 import socket
 import threading
@@ -25,7 +26,13 @@ PUBLIC_TYPES = {"register", "login"}   # the only messages allowed before loggin
 
 
 class Session:
-    """One connected client."""
+    """One connected client.
+
+    Every client has two threads: a *reader* (PabloServer._client_loop) and a
+    *writer* that sends whatever is put in its outgoing queue. send() only adds
+    to the queue, so it never blocks: a slow client delays only its own writer,
+    and messages leave in exactly the order they were queued.
+    """
 
     def __init__(self, conn: proto.Connection, addr):
         self.conn = conn
@@ -33,12 +40,28 @@ class Session:
         self.username = None
         self.token = None
         self.bad_messages = 0
+        self.outgoing = queue.Queue()
+        self.writer = threading.Thread(target=self._write_loop, name=f"writer-{self.addr}", daemon=True)
+        self.writer.start()
 
     def send(self, msg):
-        try:
-            self.conn.send(msg)
-        except OSError:
-            pass   # the client is gone; its own thread will notice and clean up
+        self.outgoing.put(msg)
+
+    def _write_loop(self):
+        while True:
+            msg = self.outgoing.get()
+            if msg is None:          # end of session
+                return
+            try:
+                self.conn.send(msg)
+            except OSError:
+                return               # the client is gone; the reader thread cleans up
+
+    def close(self):
+        """Sends what is still queued (for up to 2 s), then closes the socket."""
+        self.outgoing.put(None)
+        self.writer.join(timeout=2)
+        self.conn.close()
 
     def __str__(self):
         return f"{self.username or '?'}@{self.addr}"
@@ -80,7 +103,7 @@ class PabloServer:
         with self.lock:
             sessions = list(self.sessions.values())
         for s in sessions:
-            s.conn.close()
+            s.close()
         log.info("server stopped")
 
     def _accept_loop(self):
@@ -142,17 +165,17 @@ class PabloServer:
 
     def _disconnect(self, session: Session):
         if session.username:
-            outbox = []
             with self.lock:
+                outbox = []
                 if self.sessions.get(session.username) is session:
                     del self.sessions[session.username]
                     if self.lobby.room_of(session.username):
                         outbox = self._leave_room(session.username)
-            self._deliver(outbox)
+                    self._deliver(outbox)
             log.info("%s disconnected", session)
         else:
             log.info("%s disconnected (not logged in)", session.addr)
-        session.conn.close()
+        session.close()
 
     # ------------------------------------------------------------------ account handlers
     def on_register(self, session, msg):
@@ -190,9 +213,10 @@ class PabloServer:
 
 
     # ------------------------------------------------------------------ lobby helpers
-    # Lobby changes happen while holding self.lock; the messages they produce are
-    # collected in an "outbox" and sent after the lock is released, so a slow
-    # client can never hold up the whole server.
+    # Lobby changes happen while holding self.lock, and the messages they produce
+    # are queued *before* the lock is released. So if two players join at the
+    # same moment, everyone receives the two room updates in the order the
+    # changes really happened. (Queueing never blocks: see Session.)
 
     def _deliver(self, outbox):
         for session, msg in outbox:
@@ -223,8 +247,7 @@ class PabloServer:
     # ------------------------------------------------------------------ lobby handlers
     def on_list_rooms(self, session, msg):
         with self.lock:
-            rooms = self.lobby.list()
-        session.send(proto.make("rooms", rooms=rooms))
+            session.send(proto.make("rooms", rooms=self.lobby.list()))
 
     def on_create_room(self, session, msg):
         with self.lock:
@@ -237,7 +260,7 @@ class PabloServer:
                          session.username, room.id, room.name, room.size)
                 outbox = [(session, proto.make("room_joined", room=room.to_dict()))]
                 outbox += self._rooms_broadcast()
-        self._deliver(outbox)
+            self._deliver(outbox)
 
     def on_join_room(self, session, msg):
         with self.lock:
@@ -251,7 +274,7 @@ class PabloServer:
                 outbox = [(session, proto.make("room_joined", room=room.to_dict()))]
                 outbox += self._room_update(room, exclude=session.username)
                 outbox += self._rooms_broadcast()
-        self._deliver(outbox)
+            self._deliver(outbox)
 
     def on_leave_room(self, session, msg):
         with self.lock:
@@ -262,7 +285,7 @@ class PabloServer:
             else:
                 # the player is back in the lobby: confirm first, then the room list
                 outbox = [(session, proto.make("room_left"))] + outbox
-        self._deliver(outbox)
+            self._deliver(outbox)
 
     def on_start_game(self, session, msg):
         with self.lock:
@@ -275,7 +298,7 @@ class PabloServer:
                          session.username, room.id, room.name, ", ".join(room.players))
                 # The cards are dealt in Step 6; for now the room switches to "playing".
                 outbox = self._room_update(room) + self._rooms_broadcast()
-        self._deliver(outbox)
+            self._deliver(outbox)
 
 
 def main():

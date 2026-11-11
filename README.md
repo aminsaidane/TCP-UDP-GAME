@@ -39,7 +39,14 @@ It listens on every network interface, TCP port 5000, and prints a log line for 
 
 ### Client
 
-*(Coming in Step 5.)*
+On each player PC (needs pygame: `pip install -r requirements.txt`):
+
+```bash
+python -m client.main                         # then type the server IP in the login screen
+python -m client.main --server 192.168.1.12   # or pre-fill it
+```
+
+Click **Register** the first time (it creates the account and logs you in), **Log in** afterwards. In the lobby, create a room (3 or 4 players) or join one; the host starts the game once at least 3 players are in.
 
 ## Tests
 
