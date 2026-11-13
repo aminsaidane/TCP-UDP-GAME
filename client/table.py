@@ -9,6 +9,7 @@ import time
 
 import pygame
 
+from common import config
 from common import protocol as proto
 from client import ui
 
@@ -31,6 +32,7 @@ class TableScreen:
         self.selection = []             # cards clicked so far for a 2-card action
         self.pair_mode = False
         self.card_rects = []            # (rect, owner, slot), rebuilt every frame
+        self.pile_flash = (0.0, None)   # (until, colour): the pile glows after each cut
         self.message = ""
         self.message_ok = False
         y = 600
@@ -125,6 +127,17 @@ class TableScreen:
                 self.reveals[(ev["target"], ev["target_slot"])] = (private["card"], now + QUEEN_SECONDS)
         elif action == "skip_power":
             self._say(f"{who} skipped the power")
+        elif action == "cut":
+            card = ui.card_name(ev["card"])
+            if ev["correct"]:
+                self._say(f"{who} CUT with the {card}!")
+                self.pile_flash = (now + 0.6, ui.GREEN_OK)
+                self.reveals.pop((ev["player"], ev["slot"]), None)
+            else:
+                self._say(f"{who} cut with the {card}: WRONG, penalty card")
+                self.pile_flash = (now + 0.6, ui.RED)
+                if ev.get("disqualified"):
+                    self._say(f"{who} has more than 12 cards: disqualified this round")
         elif action == "cut_window_closed":
             self._say("Your turn!" if ev["next"] == self.me else f"{ev['next']}'s turn")
 
@@ -148,6 +161,9 @@ class TableScreen:
                 if len(self.selection) == 2:
                     self._send("peek", slots=[x[1] for x in self.selection])
                     self.selection = []
+        elif phase == "cut_window":
+            if mine:                  # anyone can cut, whoever's turn it is
+                self._send("cut", slot=slot)
         elif not self.my_turn:
             return
         elif phase == "drawn" and mine:
@@ -186,8 +202,9 @@ class TableScreen:
         if phase == "round_over":
             return "Round over (the results screen arrives in Step 8)"
         if phase == "cut_window":
-            left = max(0.0, (s["cut_remaining"] or 0) - (time.monotonic() - self.state_time))
-            return f"Cut window: {left:.1f} s   (cutting arrives in Step 7)"
+            if self.me in s.get("disqualified", []):
+                return "Cut window..."
+            return f"CUT? Click one of your cards if it is a {s['cut_rank']}  ({self.cut_left():.1f} s)"
         if not self.my_turn:
             what = {"turn": "is playing", "drawn": "is deciding what to do with the drawn card",
                     "power": f"is using a {POWER_NAMES.get(s['pending_power'], '')}"}
@@ -204,6 +221,11 @@ class TableScreen:
                 return "Jack: click one of your cards and one opponent card to swap them" + uses
             return "Queen: click any card to look at it" + uses
         return ""
+
+    def cut_left(self):
+        """Seconds left in the cut window, counted down locally from the last state."""
+        s = self.state
+        return max(0.0, (s["cut_remaining"] or 0) - (time.monotonic() - self.state_time))
 
     def _card_shown(self, owner, slot):
         hit = self.reveals.get((owner, slot))
@@ -234,6 +256,8 @@ class TableScreen:
         mine = owner == self.me
         if s["phase"] == "peek":
             return mine and self.me in s["waiting_peek"]
+        if s["phase"] == "cut_window":
+            return mine and self.me not in s.get("disqualified", [])
         if not self.my_turn:
             return False
         return ((s["phase"] in ("drawn",) and mine) or (s["phase"] == "turn" and self.pair_mode and mine)
@@ -282,8 +306,10 @@ class TableScreen:
         ui.text(surface, f"deck: {s['deck_count']}", (deck.centerx, deck.bottom + 16), size=22,
                 color=ui.PAPER_DARK, center=True)
         pile = deck.move(120, 0)
+        flash_until, flash_colour = self.pile_flash
         if s["pile_top"]:
-            ui.draw_card(surface, pile, s["pile_top"])
+            ui.draw_card(surface, pile, s["pile_top"],
+                         glow=flash_colour if time.monotonic() < flash_until else None)
         else:
             ui.empty_slot(surface, pile)
         ui.text(surface, f"pile: {s['pile_count']}", (pile.centerx, pile.bottom + 16), size=22,
@@ -296,6 +322,14 @@ class TableScreen:
         if s["phase"] == "cut_window":
             ui.text(surface, f"cut: {s['cut_rank']}", (pile.centerx, pile.y - 14), size=24,
                     color=ui.BRASS, bold=True, center=True)
+
+        # ---- cut countdown bar
+        if s["phase"] == "cut_window" and s["cut_remaining"] is not None:
+            bar = pygame.Rect(330, 372, 340, 8)
+            pygame.draw.rect(surface, ui.FELT_DARK, bar, border_radius=4)
+            part = bar.copy()
+            part.w = int(bar.w * min(1.0, self.cut_left() / config.CUT_WINDOW_SECONDS))
+            pygame.draw.rect(surface, ui.BRASS, part, border_radius=4)
 
         # ---- status banner
         ui.text(surface, self.status(), (WIDTH // 2, 394), size=28, color=ui.WHITE, bold=True, center=True)

@@ -122,5 +122,124 @@ class GameTests(ServerTestCase):
         self.assertEqual(lina.request("draw")["message"], "you are not in a game")
 
 
+class CutTests(GameTests):
+    test_game_starts_with_4_hidden_cards_each = test_peek_is_private = None
+    test_draw_is_private_and_throw_is_public = test_illegal_moves_are_refused = None
+    test_cut_window_closes_and_turn_passes = test_several_turns = test_not_in_a_game = None
+
+    """Cutting over the network. Hands are rigged so the outcome is known."""
+
+    def setUp(self):
+        super().setUp()
+        self.peek_all()
+        self.first = self.current()
+        order = ["amin", "sara", "omar"]
+        i = order.index(self.first)
+        self.second, self.third = order[(i + 1) % 3], order[(i + 2) % 3]
+
+    def rig(self, deck_top, **hands):
+        from common.cards import Card
+        game = next(iter(self.server.games.values()))
+        with self.server.lock:
+            for name, codes in hands.items():
+                game.round.hands[name] = [Card.from_code(c) for c in codes]
+            game.round.deck.append(Card.from_code(deck_top))
+
+    def throw_five(self):
+        """The first player draws a 5 and throws it: the cut window for 5s opens."""
+        self.act(self.first, "draw")
+        self.act(self.first, "throw_drawn")
+        self.assertEqual(self.state[self.second]["cut_rank"], "5")
+
+    def test_correct_cut(self):
+        self.rig("5S", **{self.second: ["5D", "1C", "2C", "3C"]})
+        self.throw_five()
+        event = self.act(self.second, "cut", slot=0)
+        self.assertEqual((event["card"], event["correct"]), ("5D", True))
+        self.assertEqual(self.state[self.third]["slots"][self.second], [False, True, True, True])
+        self.assertEqual(self.state[self.third]["pile_top"], "5D")
+        # the window closes; play continues with the player after the cutter
+        self.wait_event(self.first, "cut_window_closed")
+        self.refresh()
+        self.assertEqual(self.current(), self.third)
+
+    def test_wrong_cut_gives_penalty(self):
+        self.rig("5S", **{self.second: ["7D", "1C", "2C", "3C"]})
+        self.throw_five()
+        event = self.act(self.second, "cut", slot=0)
+        self.assertEqual((event["card"], event["correct"]), ("7D", False))
+        self.assertEqual(self.state[self.first]["slots"][self.second], [True] * 5)
+        self.wait_event(self.first, "cut_window_closed")
+        self.refresh()
+        self.assertEqual(self.current(), self.second)    # a wrong cut does not change the turn order
+
+    def test_two_cuts_last_one_decides(self):
+        self.rig("5S", **{self.second: ["5D", "1C"], self.third: ["5C", "1D"]})
+        self.throw_five()
+        self.act(self.third, "cut", slot=0)
+        self.act(self.second, "cut", slot=0)             # arrives last
+        closed = self.wait_event(self.first, "cut_window_closed")
+        self.assertEqual(closed["next"], self.third)     # the player after the LAST cutter
+
+    def test_simultaneous_cuts_are_seen_in_the_same_order_by_everyone(self):
+        """Both cut at the same instant: the server picks an order, and every client sees that same order."""
+        import threading
+        self.rig("5S", **{self.second: ["5D", "1C"], self.third: ["5C", "1D"]})
+        self.throw_five()
+        go = threading.Event()
+
+        def cut(name):
+            go.wait()
+            self.players[name].conn.send({"type": "cut", "slot": 0})
+
+        threads = [threading.Thread(target=cut, args=(n,)) for n in (self.second, self.third)]
+        for t in threads:
+            t.start()
+        go.set()                                         # release both at once
+        for t in threads:
+            t.join()
+        orders = {}
+        for name in self.players:
+            cuts = []
+            while len(cuts) < 2:
+                event = self.players[name].expect("event")["event"]
+                if event["action"] == "cut":
+                    cuts.append(event["player"])
+            orders[name] = cuts
+        self.assertEqual(len({tuple(o) for o in orders.values()}), 1, orders)   # same order everywhere
+        closed = self.wait_event(self.first, "cut_window_closed")
+        order = ["amin", "sara", "omar"]
+        last = orders[self.first][-1]
+        self.assertEqual(closed["next"], order[(order.index(last) + 1) % 3])
+
+    def test_cut_on_a_pair(self):
+        self.rig("1H", **{self.first: ["4H", "4S", "1C", "2C"], self.second: ["4D", "1S"]})
+        self.act(self.first, "throw_pair", slots=[0, 1])
+        self.assertTrue(self.act(self.second, "cut", slot=0)["correct"])
+
+    def test_cutting_your_last_card_wins_the_round(self):
+        self.rig("5S", **{self.second: ["5D"]})
+        self.throw_five()
+        self.act(self.second, "cut", slot=0)
+        self.assertEqual(self.state[self.first]["phase"], "round_over")
+        self.assertEqual(self.state[self.first]["result"]["winner"], self.second)
+
+    def test_no_cut_outside_the_window(self):
+        self.rig("5S", **{self.second: ["5D", "1C"]})
+        self.assertEqual(self.act(self.second, "cut", slot=0)["message"], "not allowed during phase 'turn'")
+        self.throw_five()
+        self.wait_event(self.second, "cut_window_closed")
+        self.refresh()
+        self.assertEqual(self.act(self.second, "cut", slot=0)["type"], "error")
+
+    def test_no_cut_while_a_power_is_used(self):
+        self.rig("QS", **{self.second: ["QD", "1C"]})
+        self.act(self.first, "draw")
+        self.act(self.first, "throw_drawn")              # Queen: power first, then the cut window
+        self.assertEqual(self.act(self.second, "cut", slot=0)["message"], "not allowed during phase 'power'")
+        self.act(self.first, "skip_power")
+        self.assertTrue(self.act(self.second, "cut", slot=0)["correct"])
+
+
 if __name__ == "__main__":
     unittest.main()

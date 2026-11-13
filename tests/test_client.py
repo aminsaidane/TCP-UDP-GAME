@@ -156,6 +156,17 @@ class ScreenFlowTests(LiveServerCase):
         self.assertIsNone(sara.screen.state["drawn"])
         self.assertIn("You drew a card:", " ".join(table.log))
         self.assertIn("amin drew a card", " ".join(sara.screen.log))
+        # amin throws it: during the cut window sara can click one of her cards to cut
+        amin.send(p.make("throw_drawn"))
+        self.pump(amin, sara, omar, until=lambda: sara.screen.state["phase"] in ("cut_window", "power"))
+        if sara.screen.state["phase"] == "power":           # amin drew a Jack/Queen
+            amin.send(p.make("skip_power"))
+            self.pump(amin, sara, omar, until=lambda: sara.screen.state["phase"] == "cut_window")
+        self.assertTrue(sara.screen._clickable("sara"))
+        self.assertFalse(sara.screen._clickable("amin"))     # only your own cards
+        sara.screen.click_card("sara", 0)
+        self.pump(amin, sara, omar, until=lambda: any(" cut with the " in line or " CUT with the " in line
+                                                     for line in amin.screen.log))
 
     def test_wrong_password_shows_error(self):
         from client.main import App

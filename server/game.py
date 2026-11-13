@@ -9,12 +9,16 @@ The only clock in the game lives here: when the engine opens a cut window,
 a timer closes it CUT_WINDOW_SECONDS later (from the timer's own thread,
 which takes the server lock like everyone else).
 """
+import logging
 import threading
 import time
+from datetime import datetime
 
 from common import config
 from common import protocol as proto
 from server.engine import CUT_WINDOW, GameError, Match
+
+log = logging.getLogger("pablo")
 
 # protocol message type -> how to call the engine
 ACTIONS = {
@@ -26,6 +30,7 @@ ACTIONS = {
     "jack":        lambda r, p, m: r.use_jack(p, m["slot"], m["target"], m["target_slot"]),
     "queen":       lambda r, p, m: r.use_queen(p, m["target"], m["target_slot"]),
     "skip_power":  lambda r, p, m: r.skip_power(p),
+    "cut":         lambda r, p, m: r.cut(p, m["slot"]),
 }
 
 
@@ -81,6 +86,13 @@ class GameRoom:
             result = ACTIONS[msg["type"]](self.round, player, msg)
         except GameError as exc:
             return [(player, proto.error(msg["type"], str(exc)))]
+        if msg["type"] == "cut":
+            # Cuts are applied in the order their messages reach the server. The
+            # millisecond timestamp in the log shows who really was first.
+            stamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            left = self.cut_deadline - time.monotonic() if self.cut_deadline else 0
+            log.info("CUT %s  room %d  %-10s %s %s (%.2f s left in the window)", stamp, self.room_id,
+                     player, result["card"], "correct" if result["correct"] else "WRONG -> penalty", left)
         outbox = self.events(result, player)
         self._check_cut_window()
         return outbox + self.states()
