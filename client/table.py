@@ -36,12 +36,20 @@ class TableScreen:
         self.message = ""
         self.message_ok = False
         y = 600
-        self.draw_btn = ui.Button((300, y, 190, 50), "Draw", lambda: self._send("draw"))
-        self.pair_btn = ui.Button((510, y, 190, 50), "Throw a pair", self._toggle_pair, kind="secondary")
+        self.draw_btn = ui.Button((195, y, 190, 50), "Draw", lambda: self._send("draw"))
+        self.pair_btn = ui.Button((405, y, 190, 50), "Throw a pair", self._toggle_pair, kind="secondary")
+        self.pablo_btn = ui.Button((615, y, 190, 50), "Pablo!", self._pablo, kind="secondary")
+        self.pablo_armed_until = 0.0    # a wrong Pablo costs +50: it takes 2 clicks
+        self.round_result = None        # the last round_over message, while the results are shown
+        self.final = None               # the match_over message
+        self.next_btn = ui.Button((WIDTH // 2 - 120, 560, 240, 54), "Next round",
+                                  lambda: self.app.send(proto.make("next_round")))
+        self.back_btn = ui.Button((WIDTH // 2 - 120, 560, 240, 54), "Back to the room", self._back_to_room)
         self.throw_btn = ui.Button((300, y, 190, 50), "Throw it", lambda: self._send("throw_drawn"))
         self.skip_btn = ui.Button((510, y, 190, 50), "Skip power", lambda: self._send("skip_power"),
                                   kind="secondary")
-        self.buttons = [self.draw_btn, self.pair_btn, self.throw_btn, self.skip_btn]
+        self.buttons = [self.draw_btn, self.pair_btn, self.pablo_btn, self.throw_btn, self.skip_btn,
+                        self.next_btn, self.back_btn]
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -61,6 +69,19 @@ class TableScreen:
     def _send(self, msg_type, **fields):
         self.show("")
         self.app.send(proto.make(msg_type, **fields))
+
+    def _pablo(self):
+        now = time.monotonic()
+        if now < self.pablo_armed_until:
+            self.pablo_armed_until = 0.0
+            self._send("pablo")
+        else:
+            self.pablo_armed_until = now + 3.0
+            self.show("Sure? A wrong Pablo costs +50. Click again to confirm.")
+
+    def _back_to_room(self):
+        self.state = self.round_result = self.final = None
+        self.app.go("room")
 
     def _toggle_pair(self):
         self.pair_mode = not self.pair_mode
@@ -82,8 +103,17 @@ class TableScreen:
     # ------------------------------------------------------------------ server messages
     def on_game_start(self, msg):
         self.log, self.reveals, self.selection = [], {}, []
+        self.round_result = self.final = None
+        self.state = None
         self.pair_mode = False
         self._say(f"Round {msg['round']} starts: pick 2 cards to peek at")
+
+    def on_round_over(self, msg):
+        self.round_result = msg
+        self.show("")
+
+    def on_match_over(self, msg):
+        self.final = msg
 
     def on_state(self, state):
         if self.state and state["phase"] != self.state["phase"]:
@@ -125,6 +155,8 @@ class TableScreen:
             self._say(f"{who} looked at {target} card {ev['target_slot'] + 1}")
             if private:
                 self.reveals[(ev["target"], ev["target_slot"])] = (private["card"], now + QUEEN_SECONDS)
+        elif action == "pablo":
+            self._say(f"{who} called PABLO!")
         elif action == "skip_power":
             self._say(f"{who} skipped the power")
         elif action == "cut":
@@ -200,7 +232,7 @@ class TableScreen:
                 return "Click 2 of your cards to look at them, and memorise them!"
             return "Waiting for " + ", ".join(s["waiting_peek"]) + " to peek..."
         if phase == "round_over":
-            return "Round over (the results screen arrives in Step 8)"
+            return "Round over"
         if phase == "cut_window":
             if self.me in s.get("disqualified", []):
                 return "Cut window..."
@@ -245,7 +277,7 @@ class TableScreen:
                 ui.empty_slot(surface, rect)
                 continue
             selected = (owner, i) in self.selection
-            hover = glow_ok and rect.collidepoint(pygame.mouse.get_pos())
+            hover = glow_ok and rect.collidepoint(ui.mouse_pos())
             ui.draw_card(surface, rect, self._card_shown(owner, i), selected=selected,
                          glow=ui.WHITE if hover else None)
             self.card_rects.append((rect, owner, i))
@@ -265,6 +297,11 @@ class TableScreen:
 
     def draw(self, surface):
         ui.felt_background(surface)
+        for b in self.buttons:
+            b.visible = False
+        if self.round_result:
+            self.draw_results(surface)
+            return
         if not self.state:
             ui.text(surface, "Dealing...", (WIDTH // 2, HEIGHT // 2), size=48, color=ui.PAPER, center=True)
             return
@@ -352,7 +389,93 @@ class TableScreen:
         self.draw_btn.enabled = bool(s["can_draw"])
         self.pair_btn.visible = turn and phase == "turn"
         self.pair_btn.label = "Cancel" if self.pair_mode else "Throw a pair"
+        self.pablo_btn.visible = turn and phase == "turn" and not self.pair_mode
+        armed = time.monotonic() < self.pablo_armed_until
+        self.pablo_btn.kind = "danger" if armed else "secondary"
+        self.pablo_btn.label = "Confirm Pablo" if armed else "Pablo!"
+        if not armed and self.message.startswith("Sure? A wrong Pablo"):
+            self.show("")
         self.throw_btn.visible = turn and phase == "drawn"
         self.skip_btn.visible = turn and phase == "power"
         for b in self.buttons:
+            b.draw(surface)
+
+    # ------------------------------------------------------------------ results
+    def headline(self, result):
+        caller, winner = result["caller"], result["winner"]
+        reason = result["reason"]
+        if reason == "empty_hand":
+            return f"{winner} got rid of every card!"
+        if reason == "disqualification":
+            return f"{winner} is the last player standing"
+        if winner is None:
+            return f"{caller} called Pablo: tie for the lowest hand, nothing happens"
+        if result["pablo_correct"]:
+            return f"{caller} called Pablo and had the lowest hand!"
+        return f"{caller} called Pablo... but {winner} was lower! (+50)"
+
+    def draw_results(self, surface):
+        msg = self.round_result
+        result, totals = msg["result"], msg["scores"]
+        title = "MATCH OVER" if self.final else f"ROUND {msg['round']} RESULTS"
+        ui.text(surface, title, (WIDTH // 2, 48), size=54, color=ui.BRASS, bold=True, center=True)
+        ui.text(surface, self.headline(result), (WIDTH // 2, 92), size=30, color=ui.WHITE, bold=True, center=True)
+
+        board = ui.panel(surface, (40, 120, WIDTH - 80, 410), radius=14)
+        cols = {"name": board.x + 20, "cards": board.x + 175, "hand": board.x + 600,
+                "round": board.x + 720, "total": board.x + 840}
+        for key, label in (("hand", "HAND"), ("round", "ROUND"), ("total", "TOTAL")):
+            ui.text(surface, label, (cols[key], board.y + 14), size=22, color=ui.INK_SOFT, bold=True, center=True)
+        players = list(totals)
+        ranking = sorted(players, key=lambda p: totals[p])
+        row_h = min(90, (board.h - 50) // len(players))
+        for i, name in enumerate(players):
+            y = board.y + 42 + i * row_h
+            if i:
+                pygame.draw.line(surface, ui.PAPER_DARK, (board.x + 14, y - 6), (board.right - 14, y - 6), 1)
+            label = name + (" (you)" if name == self.me else "")
+            ui.text(surface, label, (cols["name"], y + 10), size=28, bold=True)
+            if name == result["winner"]:
+                ui.text(surface, "round winner", (cols["name"], y + 38), size=20, color=ui.GREEN_OK, bold=True)
+            elif name == result["caller"]:
+                ui.text(surface, "called Pablo", (cols["name"], y + 38), size=20, color=ui.RED, bold=True)
+            out = name in result.get("disqualified", [])
+            cards = [c for c in result["hands"].get(name, []) if c]
+            if out:
+                ui.text(surface, "disqualified (more than 12 cards)", (cols["cards"], y + 22), size=24, color=ui.RED)
+            else:
+                w = 42
+                step = min(w + 6, (400 - w) / max(1, len(cards) - 1)) if len(cards) > 1 else 0
+                for j, code in enumerate(cards):
+                    ui.draw_card(surface, (int(cols["cards"] + j * step), y, w, 58), code)
+                if not cards:
+                    ui.text(surface, "no cards left", (cols["cards"], y + 20), size=24, color=ui.INK_SOFT)
+            hand = result["totals"].get(name)
+            ui.text(surface, "-" if hand is None else hand, (cols["hand"], y + 28), size=30, center=True)
+            score = result["scores"][name]
+            colour = ui.GREEN_OK if score < 0 else (ui.RED if score >= 50 else ui.INK)
+            ui.text(surface, f"{score:+d}", (cols["round"], y + 28), size=32, color=colour, bold=True, center=True)
+            ui.text(surface, totals[name], (cols["total"], y + 28), size=34, bold=True, center=True)
+
+        if self.final:
+            winners = self.final["winners"]
+            text = (" and ".join(winners) + (" win" if len(winners) > 1 else " wins")
+                    + f" the match after {self.final['rounds']} rounds!")
+            ui.text(surface, text, (WIDTH // 2, 553), size=32, color=ui.BRASS, bold=True, center=True)
+            ui.text(surface, "Ranking: " + "  ".join(f"{i + 1}. {p} ({totals[p]})" for i, p in enumerate(ranking)),
+                    (WIDTH // 2, 652), size=24, color=ui.PAPER, center=True)
+            self.back_btn.rect.y = 578
+            self.back_btn.visible = True
+        elif msg.get("match_over"):
+            ui.text(surface, "...", (WIDTH // 2, 580), size=30, color=ui.PAPER, center=True)
+        else:
+            host = self.app.room["host"] if self.app.room else None
+            if host == self.me:
+                self.next_btn.visible = True
+            else:
+                ui.text(surface, f"Waiting for {host} to deal the next round...", (WIDTH // 2, 585),
+                        size=28, color=ui.PAPER, center=True)
+            ui.text(surface, "First to reach 100 points ends the match. Lowest total wins.",
+                    (WIDTH // 2, 640), size=22, color=ui.PAPER_DARK, center=True)
+        for b in (self.next_btn, self.back_btn):
             b.draw(surface)

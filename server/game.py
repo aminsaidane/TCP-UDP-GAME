@@ -16,7 +16,7 @@ from datetime import datetime
 
 from common import config
 from common import protocol as proto
-from server.engine import CUT_WINDOW, GameError, Match
+from server.engine import CUT_WINDOW, ROUND_OVER, GameError, Match
 
 log = logging.getLogger("pablo")
 
@@ -31,18 +31,24 @@ ACTIONS = {
     "queen":       lambda r, p, m: r.use_queen(p, m["target"], m["target_slot"]),
     "skip_power":  lambda r, p, m: r.skip_power(p),
     "cut":         lambda r, p, m: r.cut(p, m["slot"]),
+    "pablo":       lambda r, p, m: r.call_pablo(p),
 }
 
 
 class GameRoom:
-    def __init__(self, room_id, players, lock, deliver, rng=None):
-        """`lock` is the server lock; `deliver(outbox)` queues messages (called with the lock held)."""
+    def __init__(self, room_id, players, lock, deliver, rng=None, on_finished=None):
+        """`lock` is the server lock; `deliver(outbox)` queues messages (called with the lock held).
+
+        `on_finished()` is called (lock held) if the match ends from the timer thread.
+        """
+        self.on_finished = on_finished
         self.room_id = room_id
         self.match = Match(players, rng=rng)
         self.lock = lock
         self.deliver = deliver
         self.cut_timer = None
         self.cut_deadline = None      # time.monotonic() when the open cut window closes
+        self.finished = False         # True once someone reached the target score
 
     @property
     def round(self):
@@ -93,9 +99,41 @@ class GameRoom:
             left = self.cut_deadline - time.monotonic() if self.cut_deadline else 0
             log.info("CUT %s  room %d  %-10s %s %s (%.2f s left in the window)", stamp, self.room_id,
                      player, result["card"], "correct" if result["correct"] else "WRONG -> penalty", left)
+        if msg["type"] == "pablo":
+            log.info("room %d: %s called PABLO", self.room_id, player)
         outbox = self.events(result, player)
         self._check_cut_window()
-        return outbox + self.states()
+        return outbox + self.states() + self._check_round_over()
+
+    def _check_round_over(self):
+        """When the engine has ended the round: record the scores and announce the result."""
+        if self.round.phase != ROUND_OVER or len(self.match.history) == self.match.round_number:
+            return []
+        self.stop()                                   # no cut window can still be running
+        self.match.record_round()
+        result = self.round.result
+        log.info("room %d: round %d over (%s), winner %s, round scores %s, totals %s",
+                 self.room_id, self.match.round_number, result["reason"], result["winner"],
+                 result["scores"], self.match.scores)
+        msg = proto.make("round_over", round=self.match.round_number, result=result,
+                         scores=dict(self.match.scores), match_over=self.match.is_over)
+        outbox = [(p, msg) for p in self.players]
+        if self.match.is_over:
+            self.finished = True
+            winners = self.match.winners()
+            log.info("room %d: MATCH OVER, winner(s) %s", self.room_id, ", ".join(winners))
+            over = proto.make("match_over", scores=dict(self.match.scores), winners=winners,
+                              rounds=self.match.round_number)
+            outbox += [(p, over) for p in self.players]
+        return outbox
+
+    def next_round(self):
+        """Deals the next round (the server checks that the host asked and the round is over)."""
+        if self.finished:
+            raise GameError("the match is over")
+        if self.round.phase != ROUND_OVER:
+            raise GameError("the round is not finished")
+        return self.start()
 
     def _check_cut_window(self):
         """Starts the 3-second timer when the engine has just opened a cut window."""
@@ -112,7 +150,9 @@ class GameRoom:
             if self.round.phase != CUT_WINDOW:
                 return                     # the round ended meanwhile
             result = self.round.close_cut_window()
-            self.deliver(self.events(result, None) + self.states())
+            self.deliver(self.events(result, None) + self.states() + self._check_round_over())
+            if self.finished and self.on_finished:
+                self.on_finished()
 
     def stop(self):
         if self.cut_timer:

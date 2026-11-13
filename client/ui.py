@@ -20,6 +20,14 @@ DISABLED = (150, 150, 140)
 _fonts = {}
 
 
+def mouse_pos():
+    """Mouse position, or off-screen when there is no window (automated tests)."""
+    try:
+        return pygame.mouse.get_pos()
+    except pygame.error:
+        return (-1, -1)
+
+
 def font(size, bold=False):
     key = (size, bold)
     if key not in _fonts:
@@ -78,7 +86,7 @@ class Button:
     def draw(self, surface):
         if not self.visible:
             return
-        hover = self.enabled and self.rect.collidepoint(pygame.mouse.get_pos())
+        hover = self.enabled and self.rect.collidepoint(mouse_pos())
         if not self.enabled:
             bg, fg, edge = PAPER_DARK, DISABLED, PAPER_DARK
         elif self.kind == "primary":

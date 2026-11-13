@@ -197,6 +197,7 @@ CLIENT_MESSAGES = {
     "join_room":   {"room_id": _int},
     "leave_room":  {},
     "start_game":  {},
+    "next_round":  {},
     # TCP: game actions
     "peek":        {"slots": _two_ints},
     "draw":        {},
@@ -215,7 +216,7 @@ CLIENT_MESSAGES = {
     "discover":    {"game": _str},
 }
 
-TCP_TYPES = {"register", "login", "logout", "list_rooms", "create_room", "join_room", "leave_room", "start_game",
+TCP_TYPES = {"register", "login", "logout", "list_rooms", "create_room", "join_room", "leave_room", "start_game", "next_round",
              "peek", "draw", "throw_drawn", "swap", "throw_pair", "jack", "queen",
              "skip_power", "cut", "pablo"}
 GAME_ACTIONS = {"peek", "draw", "throw_drawn", "swap", "throw_pair", "jack", "queen",

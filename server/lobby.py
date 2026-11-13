@@ -90,6 +90,13 @@ class Lobby:
             room.host = room.players[0]
         return room, False
 
+    def finish(self, room_id):
+        """The match is over: the room waits for the host to start a new one."""
+        room = self.rooms.get(room_id)
+        if room:
+            room.status = WAITING
+        return room
+
     def start(self, username):
         room = self.room_of(username)
         if room is None:

@@ -16,7 +16,7 @@ logging.disable(logging.CRITICAL)   # keep the server's console log out of the t
 # like a pushed room list, is kept in the client's inbox).
 REPLIES = {"register": "register_ok", "login": "login_ok", "list_rooms": "rooms",
            "create_room": "room_joined", "join_room": "room_joined", "leave_room": "room_left",
-           "start_game": "room_update"}
+           "start_game": "room_update", "next_round": "game_start"}
 
 
 class Client:
@@ -172,9 +172,8 @@ class MessageHandlingTests(ServerTestCase):
         self.assertTrue(all(r["type"] == "error" for r in replies))
         self.assertIsNone(c.conn.recv())          # then the server hangs up
 
-    def test_feature_not_built_yet(self):
+    def test_game_action_outside_a_game(self):
         c = self.logged_in("amin")
-        self.assertEqual(c.request("pablo")["message"], "not available yet")
         self.assertEqual(c.request("draw")["message"], "you are not in a game")
 
 

@@ -241,5 +241,76 @@ class CutTests(GameTests):
         self.assertTrue(self.act(self.second, "cut", slot=0)["correct"])
 
 
+class RoundEndTests(CutTests):
+    """Pablo, round results, next round, match end. amin is the host and plays first in round 1."""
+    test_correct_cut = test_wrong_cut_gives_penalty = test_two_cuts_last_one_decides = None
+    test_simultaneous_cuts_are_seen_in_the_same_order_by_everyone = test_cut_on_a_pair = None
+    test_cutting_your_last_card_wins_the_round = test_no_cut_outside_the_window = None
+    test_no_cut_while_a_power_is_used = None
+
+    def call_pablo(self, name):
+        self.act(name, "pablo")
+        return {n: c.expect("round_over") for n, c in self.players.items()}
+
+    def test_correct_pablo(self):
+        self.rig("1S", amin=["1H", "KH"], sara=["2D", "3D"], omar=["7H", "JC"])
+        over = self.call_pablo("amin")
+        result = over["omar"]["result"]
+        self.assertEqual((result["reason"], result["caller"], result["pablo_correct"]), ("pablo", "amin", True))
+        self.assertEqual(result["scores"], {"amin": -5, "sara": 5, "omar": 17})
+        self.assertEqual(result["hands"]["sara"], ["2D", "3D"])          # every hand revealed
+        self.assertEqual(over["sara"]["scores"], {"amin": -5, "sara": 5, "omar": 17})
+        self.assertFalse(over["amin"]["match_over"])
+        self.assertEqual(self.state["sara"]["phase"], "round_over")
+
+    def test_wrong_pablo_costs_50(self):
+        self.rig("1S", amin=["4H", "3H"], sara=["1D", "2D"], omar=["7H"])
+        result = self.call_pablo("amin")["amin"]["result"]
+        self.assertFalse(result["pablo_correct"])
+        self.assertEqual(result["winner"], "sara")
+        self.assertEqual(result["scores"], {"amin": 57, "sara": -5, "omar": 7})
+
+    def test_tie_nothing_happens(self):
+        self.rig("1S", amin=["1H", "2H"], sara=["3D"], omar=["7H"])
+        result = self.call_pablo("amin")["amin"]["result"]
+        self.assertIsNone(result["winner"])
+        self.assertEqual(result["scores"], {"amin": 3, "sara": 3, "omar": 7})
+
+    def test_next_round_host_only_and_scores_carry_over(self):
+        self.assertEqual(self.players["amin"].request("next_round")["message"], "the round is not finished")
+        self.rig("1S", amin=["1H", "KH"], sara=["2D", "3D"], omar=["7H", "JC"])
+        self.call_pablo("amin")
+        self.assertEqual(self.players["sara"].request("next_round")["message"],
+                         "only the host can start the next round")
+        self.players["amin"].conn.send({"type": "next_round"})
+        starts = {n: c.expect("game_start") for n, c in self.players.items()}
+        self.assertEqual(starts["omar"]["round"], 2)
+        self.assertEqual(starts["omar"]["scores"], {"amin": -5, "sara": 5, "omar": 17})
+        self.refresh()
+        self.assertEqual(self.state["omar"]["phase"], "peek")
+        self.assertEqual(self.state["omar"]["slots"]["sara"], [True] * 4)   # fresh hands
+        self.assertEqual(self.state["omar"]["current"], "sara")             # the first player rotates
+
+    def test_match_ends_at_100_and_room_can_play_again(self):
+        game = next(iter(self.server.games.values()))
+        with self.server.lock:
+            game.match.scores.update({"amin": 60, "sara": 10, "omar": 20})
+        self.rig("1S", amin=["7H", "7C"], sara=["1D"], omar=["2C"])
+        over = self.call_pablo("amin")                                     # wrong: 60 + 14 + 50
+        self.assertTrue(over["omar"]["match_over"])
+        final = {n: c.expect("match_over") for n, c in self.players.items()}
+        self.assertEqual(final["sara"]["scores"], {"amin": 124, "sara": 5, "omar": 22})
+        self.assertEqual(final["sara"]["winners"], ["sara"])
+        room = self.players["omar"].expect("room_update")["room"]
+        while room["status"] == "playing":                                 # skip the older update
+            room = self.players["omar"].expect("room_update")["room"]
+        self.assertEqual((room["status"], room["can_start"]), ("waiting", True))
+        self.assertEqual(self.players["amin"].request("next_round")["message"], "you are not in a game")
+        # same room, new match: scores start from 0 again
+        self.players["amin"].conn.send({"type": "start_game"})
+        start = self.players["sara"].expect("game_start")
+        self.assertEqual((start["round"], start["scores"]), (1, {"amin": 0, "sara": 0, "omar": 0}))
+
+
 if __name__ == "__main__":
     unittest.main()

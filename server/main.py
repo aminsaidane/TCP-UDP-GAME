@@ -17,6 +17,7 @@ import threading
 from common import config
 from common import protocol as proto
 from server.accounts import AccountError, AccountStore
+from server.engine import GameError
 from server.game import ACTIONS, GameRoom
 from server.lobby import Lobby, LobbyError
 
@@ -87,6 +88,7 @@ class PabloServer:
             "join_room": self.on_join_room,
             "leave_room": self.on_leave_room,
             "start_game": self.on_start_game,
+            "next_round": self.on_next_round,
         }
         for action in ACTIONS:              # peek, draw, swap... all go to the game
             self.handlers[action] = self.on_game_action
@@ -310,7 +312,8 @@ class PabloServer:
                 log.info("'%s' started the game in room %d '%s' with %s",
                          session.username, room.id, room.name, ", ".join(room.players))
                 outbox = self._room_update(room) + self._rooms_broadcast()
-                game = GameRoom(room.id, room.players, self.lock, self._deliver_named)
+                game = GameRoom(room.id, room.players, self.lock, self._deliver_named,
+                                on_finished=lambda r=room: self._end_match(r))
                 self.games[room.id] = game
                 self._deliver(outbox)
                 outbox = []
@@ -326,6 +329,29 @@ class PabloServer:
                 session.send(proto.error(msg["type"], "you are not in a game"))
                 return
             self._deliver_named(game.act(session.username, msg))
+            if game.finished:
+                self._end_match(room)
+
+    def _end_match(self, room):
+        """Match over: the room goes back to 'waiting' so the same players can play again."""
+        self.games.pop(room.id).stop()
+        self.lobby.finish(room.id)
+        self._deliver(self._room_update(room) + self._rooms_broadcast())
+
+    def on_next_round(self, session, msg):
+        with self.lock:
+            room = self.lobby.room_of(session.username)
+            game = self.games.get(room.id) if room else None
+            if game is None:
+                session.send(proto.error("next_round", "you are not in a game"))
+            elif room.host != session.username:
+                session.send(proto.error("next_round", "only the host can start the next round"))
+            else:
+                try:
+                    self._deliver_named(game.next_round())
+                    log.info("room %d: round %d dealt", room.id, game.match.round_number)
+                except GameError as exc:
+                    session.send(proto.error("next_round", str(exc)))
 
 
 def main():

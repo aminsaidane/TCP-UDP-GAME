@@ -346,6 +346,10 @@ class App:
             self.screens["table"].on_state(msg["state"])
         elif kind == "event":
             self.screens["table"].on_event(msg["event"])
+        elif kind == "round_over":
+            self.screens["table"].on_round_over(msg)
+        elif kind == "match_over":
+            self.screens["table"].on_match_over(msg)
         elif kind == "error":
             self.pending_login = None
             self.screen.show(msg["message"])

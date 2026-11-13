@@ -16,7 +16,7 @@ from server.main import PabloServer
 logging.disable(logging.CRITICAL)
 
 try:
-    import pygame  # noqa: F401
+    import pygame
     HAVE_PYGAME = True
 except ImportError:
     HAVE_PYGAME = False
@@ -167,6 +167,37 @@ class ScreenFlowTests(LiveServerCase):
         sara.screen.click_card("sara", 0)
         self.pump(amin, sara, omar, until=lambda: any(" cut with the " in line or " CUT with the " in line
                                                      for line in amin.screen.log))
+
+    def test_pablo_results_and_next_round(self):
+        amin, sara, omar = self.app("amin"), self.app("sara"), self.app("omar")
+        amin.screen.create()
+        self.pump(amin, until=lambda: amin.room)
+        for other in (sara, omar):
+            other.send(p.make("join_room", room_id=amin.room["id"]))
+            self.pump(amin, sara, omar, until=lambda o=other: o.room)
+        amin.screen.start()
+        everyone = (amin, sara, omar)
+        self.pump(*everyone, until=lambda: all(type(a.screen).__name__ == "TableScreen" and a.screen.state
+                                               for a in everyone))
+        for a in everyone:
+            a.screen.click_card(a.username, 0)
+            a.screen.click_card(a.username, 1)
+        self.pump(*everyone, until=lambda: amin.screen.state["phase"] == "turn")
+        table = amin.screen
+        table._pablo()                                   # 1st click only asks for confirmation
+        self.assertIn("Click again", table.message)
+        table._pablo()                                   # 2nd click calls Pablo
+        self.pump(*everyone, until=lambda: all(a.screen.round_result for a in everyone))
+        result = sara.screen.round_result["result"]
+        self.assertEqual((result["reason"], result["caller"]), ("pablo", "amin"))
+        self.assertEqual(len(result["hands"]["omar"]), 4)            # everyone's cards are revealed
+        amin.draw(pygame.Surface((1000, 680)))                       # host sees "Next round"
+        self.assertTrue(table.next_btn.visible)
+        sara.draw(pygame.Surface((1000, 680)))
+        self.assertFalse(sara.screen.next_btn.visible)
+        table.next_btn.on_click()
+        self.pump(*everyone, until=lambda: sara.screen.state and sara.screen.state["round"] == 2)
+        self.assertIsNone(sara.screen.round_result)
 
     def test_wrong_password_shows_error(self):
         from client.main import App

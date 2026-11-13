@@ -57,7 +57,10 @@ Click **Register** the first time (it creates the account and logs you in), **Lo
 | After drawing | **Throw it**, or click one of your cards to swap it with the drawn card |
 | Jack power | click one of your cards and one opponent card (or **Skip power**) |
 | Queen power | click any card to see it for 3 seconds (or **Skip power**) |
+| Your turn, you think your hand is the lowest | **Pablo!** then **Confirm Pablo** (a wrong call costs +50) |
 | Cut window (3 s after any throw, anyone) | click one of **your** cards with the same number as the pile. Wrong = penalty card |
+
+After each round everyone's cards are revealed with the scores; the host clicks **Next round**. The match ends when someone reaches 100 points (lowest total wins), and the room is ready for a new match.
 
 ## Tests
 
