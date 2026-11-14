@@ -216,6 +216,15 @@ class ScreenFlowTests(LiveServerCase):
         amin.screen.leave()
         self.pump(amin, until=lambda: type(amin.screen).__name__ == "LobbyScreen")
 
+    def test_dropped_by_server_returns_to_login(self):
+        """Our Wi-Fi was off long enough for the server to drop us; when it comes back the
+        server answers our next heartbeat with session_unknown and we go back to login."""
+        amin = self.app("amin")
+        with self.server.lock:
+            self.server.sessions["amin"].token = "replaced"     # as if the server had dropped us
+        self.pump(amin, until=lambda: type(amin.screen).__name__ == "LoginScreen")
+        self.assertIn("log in again", amin.screen.message)
+
     def test_server_crash_returns_to_login(self):
         amin = self.app("amin")
         self.server.sessions["amin"].conn.close()   # the connection dies on the server side

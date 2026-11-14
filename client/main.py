@@ -330,6 +330,13 @@ class App:
         kind = msg["type"]
         if kind == "_connect_failed":
             self.screens["login"].show(msg["message"])
+        elif kind == "session_unknown" and self.username:
+            # The server dropped us (e.g. our Wi-Fi was off) and our TCP socket never noticed.
+            self.net.close()
+            self.udp.stop()
+            self.username = self.room = None
+            self.go("login")
+            self.screen.show("The server lost your connection: log in again to rejoin")
         elif kind == "_disconnected":
             self.net.close()
             self.udp.stop()

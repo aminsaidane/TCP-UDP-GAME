@@ -5,6 +5,7 @@ CS411 Project 2. A real-time multiplayer version of **Pablo**, a memory card gam
 - **1 server + 3 or 4 clients**, each on its own PC.
 - Full rules: [RULES.md](RULES.md).
 - Every network message, and why it uses TCP or UDP: [PROTOCOL.md](PROTOCOL.md).
+- Setting up the 4 PCs, the demo script and Wireshark filters: [DEMO.md](DEMO.md).
 
 ## Project layout
 
@@ -38,6 +39,16 @@ It listens on every network interface, TCP port 5000, and prints a log line for 
 | `--udp-port` | `5001` | UDP port (heartbeats, hover, timer ticks) |
 | `--discovery-port` | `5002` | UDP port answering LAN discovery broadcasts |
 | `--users-file` | `users.json` | where accounts are saved (passwords are stored as salted hashes) |
+| `--stats` | off | print a TCP/UDP traffic summary every 10 seconds |
+
+### Network check
+
+Before playing, on each player PC:
+
+```bash
+python -m client.check             # finds the server (UDP broadcast), tests TCP and UDP, says what to fix
+python -m client.check 192.168.1.12
+```
 
 ### Client
 

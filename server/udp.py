@@ -55,7 +55,9 @@ class UdpService:
     def send(self, addr, msg):
         msg["seq"] = next(self.outgoing_seq)
         try:
-            self.game_sock.sendto(proto.encode_datagram(msg), addr)
+            data = proto.encode_datagram(msg)
+            self.game_sock.sendto(data, addr)
+            self.server.stats.count("udp", "out", msg["type"], len(data))
         except OSError:
             pass                                            # UDP: fire and forget
 
@@ -69,6 +71,7 @@ class UdpService:
             msg = proto.decode_datagram(data)
             if msg is None:
                 continue
+            self.server.stats.count("udp", "in", str(msg.get("type")), len(data))
             try:
                 proto.validate(msg, allowed=proto.UDP_TYPES)
             except proto.ProtocolError:
@@ -76,28 +79,38 @@ class UdpService:
             self._handle(msg, addr)
 
     def _handle(self, msg, addr):
-        relay = []
+        replies = []                                        # sent after the lock is released
         with self.server.lock:
             session = next((s for s in self.server.sessions.values() if s.token == msg["token"]), None)
             if session is None:
-                return                                      # unknown token: not one of our players
-            if not self.incoming.accept(msg["token"], msg["seq"]):
-                return                                      # late or duplicate packet
-            if session.udp_addr != addr:
-                log.info("%s UDP address is %s:%d", session, addr[0], addr[1])
-            session.udp_addr = addr                         # where to send this player's UDP
-            session.last_heartbeat = time.monotonic()       # any packet proves the client is alive
-            if msg["type"] == "hover":
-                room = self.server.lobby.room_of(session.username)
-                if room and room.id in self.server.games and (
-                        msg["target"] in room.players and (msg["slot"] is None or 0 <= msg["slot"] < 16)):
-                    out = proto.make("hover", player=session.username, target=msg["target"], slot=msg["slot"])
-                    for name in room.players:
-                        other = self.server.sessions.get(name)
-                        if name != session.username and other and other.udp_addr:
-                            relay.append((other.udp_addr, dict(out)))
-        for addr_, out in relay:
-            self.send(addr_, out)
+                # Not (or no longer) a logged-in player, e.g. a client whose Wi-Fi came back
+                # after the server dropped it: tell it, so it can log in again.
+                if msg["type"] == "heartbeat":
+                    replies.append((addr, proto.make("session_unknown")))
+            elif self.incoming.accept(msg["token"], msg["seq"]):     # drop late or duplicate packets
+                if session.udp_addr != addr:
+                    log.info("%s UDP address is %s:%d", session, addr[0], addr[1])
+                session.udp_addr = addr                     # where to send this player's UDP
+                session.last_heartbeat = time.monotonic()   # any packet proves the client is alive
+                if msg["type"] == "hover":
+                    replies += self._hover_relays(session, msg)
+        for to, out in replies:
+            self.send(to, out)
+
+    def _hover_relays(self, session, msg):
+        """The hover packet for every other player in the same running game."""
+        room = self.server.lobby.room_of(session.username)
+        if not room or room.id not in self.server.games or msg["target"] not in room.players:
+            return []
+        if msg["slot"] is not None and not 0 <= msg["slot"] < 16:
+            return []
+        out = proto.make("hover", player=session.username, target=msg["target"], slot=msg["slot"])
+        relays = []
+        for name in room.players:
+            other = self.server.sessions.get(name)
+            if name != session.username and other and other.udp_addr:
+                relays.append((other.udp_addr, dict(out)))
+        return relays
 
     # ------------------------------------------------------------------ timer ticks
     def _tick_loop(self):
@@ -126,10 +139,13 @@ class UdpService:
             msg = proto.decode_datagram(data)
             if not msg or msg.get("type") != "discover" or msg.get("game") != "pablo":
                 continue
+            self.server.stats.count("discovery", "in", "discover", len(data))
             log.info("LAN discovery request from %s:%d", *addr)
             reply = proto.make("server_here", name=socket.gethostname(),
                                tcp_port=self.server.port, udp_port=self.port)
             try:
-                self.discovery_sock.sendto(proto.encode_datagram(reply), addr)
+                data = proto.encode_datagram(reply)
+                self.discovery_sock.sendto(data, addr)
+                self.server.stats.count("discovery", "out", "server_here", len(data))
             except OSError:
                 pass

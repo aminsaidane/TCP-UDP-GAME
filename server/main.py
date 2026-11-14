@@ -17,10 +17,12 @@ import time
 
 from common import config
 from common import protocol as proto
+from common.net import local_addresses
 from server.accounts import AccountError, AccountStore
 from server.engine import GameError
 from server.game import ACTIONS, GameRoom
 from server.lobby import Lobby, LobbyError
+from server.stats import TrafficStats
 from server.udp import UdpService
 
 log = logging.getLogger("pablo")
@@ -38,7 +40,7 @@ class Session:
     and messages leave in exactly the order they were queued.
     """
 
-    def __init__(self, conn: proto.Connection, addr):
+    def __init__(self, conn: proto.Connection, addr, stats=None):
         self.conn = conn
         self.addr = f"{addr[0]}:{addr[1]}"
         self.username = None
@@ -46,6 +48,7 @@ class Session:
         self.bad_messages = 0
         self.udp_addr = None          # learnt from the client's first UDP packet
         self.last_heartbeat = None    # time.monotonic() of the last UDP packet
+        self.stats = stats or TrafficStats()
         self.outgoing = queue.Queue()
         self.writer = threading.Thread(target=self._write_loop, name=f"writer-{self.addr}", daemon=True)
         self.writer.start()
@@ -60,6 +63,7 @@ class Session:
                 return
             try:
                 self.conn.send(msg)
+                self.stats.count("tcp", "out", msg.get("type", "?"), len(proto.encode_line(msg)))
             except OSError:
                 return               # the client is gone; the reader thread cleans up
 
@@ -78,6 +82,8 @@ class PabloServer:
                  udp_port=config.UDP_PORT, discovery_port=config.DISCOVERY_PORT):
         self.host, self.port = host, port
         self.udp_port, self.discovery_port = udp_port, discovery_port
+        self.stats = TrafficStats()
+        self.stats_interval = None          # seconds between traffic summaries (None = off)
         self.udp = None
         self.accounts = AccountStore(users_file)
         self.sessions = {}                  # username -> Session (logged-in players only)
@@ -110,7 +116,18 @@ class PabloServer:
         log.info("TCP server listening on %s:%d", self.host, self.port)
         self.udp = UdpService(self, self.host, self.udp_port, self.discovery_port)
         self.udp.start()
+        if self.host in ("0.0.0.0", ""):
+            addresses = local_addresses()
+            if addresses:
+                log.info("Players connect to: %s  (or click Find in the client)", "  or  ".join(addresses))
         threading.Thread(target=self._monitor_loop, name="monitor", daemon=True).start()
+        if self.stats_interval:
+            threading.Thread(target=self._stats_loop, name="stats", daemon=True).start()
+
+    def _stats_loop(self):
+        while self.running:
+            time.sleep(self.stats_interval)
+            log.info("[traffic] %s", self.stats.summary())
 
     def stop(self):
         self.running = False
@@ -152,7 +169,7 @@ class PabloServer:
             except OSError:
                 break   # listener closed by stop()
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # send small messages at once
-            session = Session(proto.Connection(sock), addr)
+            session = Session(proto.Connection(sock), addr, self.stats)
             log.info("connection from %s", session.addr)
             threading.Thread(target=self._client_loop, args=(session,),
                              name=f"client-{session.addr}", daemon=True).start()
@@ -163,6 +180,8 @@ class PabloServer:
             while True:
                 try:
                     msg = session.conn.recv()
+                    if msg is not None:
+                        self.stats.count("tcp", "in", msg.get("type", "?"), len(proto.encode_line(msg)))
                 except proto.ProtocolError as exc:
                     if self._bad_message(session, "?", str(exc)):
                         break
@@ -424,10 +443,14 @@ def main():
     parser.add_argument("--discovery-port", type=int, default=config.DISCOVERY_PORT,
                         help="UDP port answering LAN discovery broadcasts")
     parser.add_argument("--users-file", default="users.json", help="where accounts are saved")
+    parser.add_argument("--stats", action="store_true",
+                        help="print a TCP/UDP traffic summary every 10 seconds")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
     server = PabloServer(args.host, args.port, args.users_file, args.udp_port, args.discovery_port)
+    if args.stats:
+        server.stats_interval = 10
     server.start()
     try:
         threading.Event().wait()   # sleep until Ctrl+C

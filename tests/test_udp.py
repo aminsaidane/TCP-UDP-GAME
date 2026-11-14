@@ -110,6 +110,12 @@ class HeartbeatTests(ServerTestCase):
         self.send("hello", seq=2)                 # still answering afterwards
         self.assertTrue(wait_until(lambda: self.server.sessions["amin"].udp_addr))
 
+    def test_stale_session_is_told_to_log_in_again(self):
+        """A client the server already dropped (Wi-Fi was off) keeps sending heartbeats."""
+        self.send("heartbeat", token="e" * 32, seq=7)
+        replies = receive_all(self.sock)
+        self.assertEqual([m["type"] for m in replies], ["session_unknown"])
+
     def test_udp_client_sends_heartbeats(self):
         client = UdpClient(queue.Queue())
         client.start("127.0.0.1", self.server.udp.port, self.token)

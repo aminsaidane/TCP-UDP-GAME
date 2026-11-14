@@ -137,7 +137,8 @@ Each one is an engine method from `server/engine.py`. `slot` numbers are positio
 | C → S | `heartbeat` | `token`, `seq` | Every 1 s. No heartbeat for 5 s → the player counts as disconnected |
 | C → S | `hover` | `token`, `seq`, `target`, `slot` | The card under my mouse (`target` = whose hand; `slot` = null when not hovering) |
 | S → C | `hover` | `seq`, `player`, `target`, `slot` | Relayed to the other players in the room, who see the highlighted card |
-| S → C | `timer` | `seq`, `kind` (`"cut"` or `"turn"`), `remaining` (seconds) | Countdown ticks, several per second |
+| S → C | `timer` | `seq`, `kind` (`"cut"`), `remaining` (seconds) | Cut-window countdown, 5 ticks per second |
+| S → C | `session_unknown` | `seq` | Answer to a heartbeat whose token the server doesn't know (it already dropped that client, e.g. after its Wi-Fi was off): the client goes back to the login screen |
 
 Hover and timer updates are pure display: if one is lost, the next one fixes the screen. The **real** decisions (the cut window closing, a turn timing out) are made by the server clock, and their results arrive over TCP.
 

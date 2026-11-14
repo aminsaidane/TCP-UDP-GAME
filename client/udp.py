@@ -67,7 +67,8 @@ class UdpClient:
             except OSError:
                 return                           # socket closed
             msg = proto.decode_datagram(data)
-            if msg and msg.get("type") in ("hover", "timer") and self.filter.accept("server", msg.get("seq")):
+            if msg and msg.get("type") in ("hover", "timer", "session_unknown") and \
+                    self.filter.accept("server", msg.get("seq")):
                 msg["_udp"] = True
                 self.inbox.put(msg)
 
