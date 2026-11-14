@@ -133,6 +133,21 @@ class TableScreen:
             target, slot = hit if hit else (self.me, None)
             self.app.udp.send("hover", target=target, slot=slot)
 
+    def on_player_left(self, msg):
+        how = {"disconnected": "lost the connection", "left": "left the game"}.get(msg["reason"], msg["reason"])
+        back = " (can come back next round)" if msg["reason"] == "disconnected" else ""
+        self._say(f"{msg['username']} {how}{back}")
+
+    @property
+    def watching(self):
+        return bool(self.state and self.state.get("watching"))
+
+    def turn_left(self):
+        s = self.state
+        if s.get("turn_remaining") is None:
+            return None
+        return max(0.0, s["turn_remaining"] - (time.monotonic() - self.state_time))
+
     def on_round_over(self, msg):
         self.round_result = msg
         self.show("")
@@ -195,6 +210,15 @@ class TableScreen:
                 self.pile_flash = (now + 0.6, ui.RED)
                 if ev.get("disqualified"):
                     self._say(f"{who} has more than 12 cards: disqualified this round")
+        elif action == "player_left":
+            self._say(f"{who} is out of this round: their cards go back into the deck")
+        elif action == "timeout":
+            if ev["phase"] == "peek":
+                self._say("Time's up for peeking: " + ", ".join(ev["players"]))
+            elif ev["phase"] == "drawn":
+                self._say(f"{who} took too long: the {ui.card_name(ev['card'])} is thrown")
+            else:
+                self._say(f"{who} took too long: turn skipped")
         elif action == "cut_window_closed":
             self._say("Your turn!" if ev["next"] == self.me else f"{ev['next']}'s turn")
 
@@ -252,6 +276,9 @@ class TableScreen:
     def status(self):
         s = self.state
         cur, phase = s["current"], s["phase"]
+        if self.watching and phase != "round_over":
+            what = {"peek": "players are peeking", "cut_window": f"cut window ({self.cut_left():.1f} s)"}
+            return f"Watching: {what.get(phase, cur + ' is playing')}. You'll be dealt in next round."
         if phase == "peek":
             if self.me in s["waiting_peek"]:
                 return "Click 2 of your cards to look at them, and memorise them!"
@@ -266,6 +293,11 @@ class TableScreen:
             what = {"turn": "is playing", "drawn": "is deciding what to do with the drawn card",
                     "power": f"is using a {POWER_NAMES.get(s['pending_power'], '')}"}
             return f"{cur} {what.get(phase, '')}..."
+        left = self.turn_left()
+        hurry = f"  ({left:.0f} s left!)" if left is not None and left < 15 else ""
+        return self._my_status(s, phase) + hurry
+
+    def _my_status(self, s, phase):
         if phase == "turn":
             if self.pair_mode:
                 return "Click the 2 cards you think are a pair"
@@ -356,8 +388,11 @@ class TableScreen:
 
         # ---- opponents, in seat order starting after me
         players = s["players"]
-        me_i = players.index(self.me)
-        opponents = players[me_i + 1:] + players[:me_i]
+        if self.me in players:
+            me_i = players.index(self.me)
+            opponents = players[me_i + 1:] + players[:me_i]
+        else:
+            opponents = list(players)          # watching a round we were not dealt in
         gap = 16
         pw = (WIDTH - 40 - gap * (len(opponents) - 1)) // len(opponents)
         for i, name in enumerate(opponents):
@@ -366,7 +401,7 @@ class TableScreen:
             ui.panel(surface, rect, color=ui.FELT_LIGHT, radius=12, shadow=False)
             if current:
                 pygame.draw.rect(surface, ui.BRASS, rect, width=3, border_radius=12)
-            label = name + ("  (out)" if name in out else "")
+            label = name + ("  (out)" if name in out else "") + ("  (away)" if name in s.get("left", []) else "")
             ui.text(surface, label, (rect.x + 14, rect.y + 10), size=28, color=ui.PAPER, bold=True)
             ui.text(surface, f"{sum(s['slots'][name])} cards · {s['scores'][name]} pts",
                     (rect.right - 14, rect.y + 13), size=22, color=ui.PAPER_DARK, right=True)
@@ -423,15 +458,21 @@ class TableScreen:
 
         # ---- my hand
         mine = pygame.Rect(150, 438, 700, 150)
-        if self.my_turn and s["phase"] not in ("peek", "round_over"):
+        if self.my_turn and not self.watching and s["phase"] not in ("peek", "round_over"):
             pygame.draw.rect(surface, ui.BRASS, mine.inflate(16, 4), width=3, border_radius=14)
-        me_label = f"{self.me} (you) · {s['scores'][self.me]} pts" + ("  · OUT this round" if self.me in out else "")
+        me_label = f"{self.me} (you) · {s['scores'].get(self.me, 0)} pts" + ("  · OUT this round" if self.me in out else "")
         ui.text(surface, me_label, (mine.x + 12, mine.y + 4), size=24, color=ui.PAPER, bold=True)
-        self._hand(surface, self.me, s["slots"][self.me], mine.x, mine.y + 24, mine.w, MY_CARD,
-                   self._clickable(self.me))
+        if self.watching:
+            ui.text(surface, "You are watching this round.", (mine.centerx, mine.y + 62), size=32,
+                    color=ui.PAPER, bold=True, center=True)
+            ui.text(surface, "Your cards went back into the deck; you'll get new ones next round.",
+                    (mine.centerx, mine.y + 96), size=24, color=ui.PAPER_DARK, center=True)
+        else:
+            self._hand(surface, self.me, s["slots"][self.me], mine.x, mine.y + 24, mine.w, MY_CARD,
+                       self._clickable(self.me))
 
         # ---- buttons
-        phase, turn = s["phase"], self.my_turn
+        phase, turn = s["phase"], self.my_turn and not self.watching
         self.draw_btn.visible = turn and phase == "turn"
         self.draw_btn.enabled = bool(s["can_draw"])
         self.pair_btn.visible = turn and phase == "turn"
@@ -454,6 +495,8 @@ class TableScreen:
         reason = result["reason"]
         if reason == "empty_hand":
             return f"{winner} got rid of every card!"
+        if reason == "players_left":
+            return f"{winner} is the last player still in the round" if winner else "Everyone left the round"
         if reason == "disqualification":
             return f"{winner} is the last player standing"
         if winner is None:
@@ -489,7 +532,10 @@ class TableScreen:
                 ui.text(surface, "called Pablo", (cols["name"], y + 38), size=20, color=ui.RED, bold=True)
             out = name in result.get("disqualified", [])
             cards = [c for c in result["hands"].get(name, []) if c]
-            if out:
+            if name in result.get("left", []) or name not in result["scores"] and not out:
+                ui.text(surface, "not in this round (connection lost / left)", (cols["cards"], y + 22),
+                        size=24, color=ui.INK_SOFT)
+            elif out:
                 ui.text(surface, "disqualified (more than 12 cards)", (cols["cards"], y + 22), size=24, color=ui.RED)
             else:
                 w = 42
@@ -500,9 +546,13 @@ class TableScreen:
                     ui.text(surface, "no cards left", (cols["cards"], y + 20), size=24, color=ui.INK_SOFT)
             hand = result["totals"].get(name)
             ui.text(surface, "-" if hand is None else hand, (cols["hand"], y + 28), size=30, center=True)
-            score = result["scores"][name]
-            colour = ui.GREEN_OK if score < 0 else (ui.RED if score >= 50 else ui.INK)
-            ui.text(surface, f"{score:+d}", (cols["round"], y + 28), size=32, color=colour, bold=True, center=True)
+            score = result["scores"].get(name)
+            if score is None:                     # was not in this round (disconnected / left)
+                ui.text(surface, "away", (cols["round"], y + 28), size=26, color=ui.INK_SOFT, center=True)
+            else:
+                colour = ui.GREEN_OK if score < 0 else (ui.RED if score >= 50 else ui.INK)
+                ui.text(surface, f"{score:+d}", (cols["round"], y + 28), size=32, color=colour, bold=True,
+                        center=True)
             ui.text(surface, totals[name], (cols["total"], y + 28), size=34, bold=True, center=True)
 
         if self.final:

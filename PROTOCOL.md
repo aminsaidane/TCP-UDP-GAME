@@ -99,7 +99,7 @@ A *room* object:
 | `event` | `event` | What just happened, e.g. `{"action": "cut", "player": "sara", "card": "5D", "correct": true}`. Everyone gets the public part; only the player concerned also gets `event.private` (the card they drew or peeked at). |
 | `round_over` | `round`, `result`, `scores`, `match_over` | Round result. `result` has `reason` (`"pablo"`, `"empty_hand"` or `"disqualification"`), `winner`, `caller`, `pablo_correct`, `totals` (each hand's points), `scores` (this round's scores), `hands` (**every hand revealed**) and `disqualified`. `scores` are the match totals. `match_over` is true if this round ended the match. |
 | `match_over` | `scores`, `winners`, `rounds` | Someone reached 100: final totals and winner(s). The room goes back to `"waiting"` (a `room_update` follows) so the host can start a new match. |
-| `player_left` | `username`, `reason` | A player disconnected (`"disconnected"`, `"timeout"` or `"left"`) |
+| `player_left` | `username`, `reason` | A player dropped out of the game: `"disconnected"` (connection lost, or no UDP heartbeat for 5 s) or `"left"` (Leave button). The round goes on without them. |
 
 ### Client → server (game actions)
 
@@ -120,6 +120,14 @@ Each one is an engine method from `server/engine.py`. `slot` numbers are positio
 | `next_round` | – | **host only**, after `round_over`: deal the next round (the first player rotates) |
 
 **Why cuts go over TCP even though they are a race:** a lost cut packet would silently cost a player a move they made, which is unfair. TCP guarantees the cut arrives; the race is decided by the order in which the server **receives** cuts from the different TCP connections, so network speed still decides who was first.
+
+### Disconnections, rejoining, timeouts
+
+- **Connection lost mid-game** (TCP closed, or no UDP heartbeat for 5 s): the player is removed from the current round (their cards go back into the deck, the turn passes if it was theirs) and scores nothing for it. Their seat in the room is kept (`room.disconnected`).
+- **Logging back in**: the server sends `room_joined`, then `game_start` with `"watching": true` and the current `state` (also `"watching": true`). They see the rest of the round and are **dealt in again at the next round**.
+- **Leave button** (`leave_room`) during a game: same removal, but the seat is freed; no coming back to that match.
+- **Fewer than 2 connected players**: the match ends (`match_over`).
+- **Turn timeout** (60 s, `state.turn_remaining`): the server skips the player: a turn passes, a drawn card is thrown (no power, no cut), a power is skipped, unfinished peeks are cancelled. Everyone gets an `event` `{"action": "timeout", ...}`.
 
 ## 7. Real-time layer (UDP, port 5001)
 

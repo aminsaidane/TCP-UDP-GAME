@@ -22,14 +22,24 @@ class Room:
         self.host = host
         self.players = [host]         # in seat order
         self.status = WAITING
+        self.disconnected = []        # players whose connection dropped mid-game (seat kept)
+
+    @property
+    def connected(self):
+        return [p for p in self.players if p not in self.disconnected]
 
     @property
     def can_start(self):
-        return self.status == WAITING and len(self.players) >= config.MIN_PLAYERS_TO_START
+        return self.status == WAITING and len(self.connected) >= config.MIN_PLAYERS_TO_START
 
     def to_dict(self):
         return {"id": self.id, "name": self.name, "size": self.size, "host": self.host,
-                "players": list(self.players), "status": self.status, "can_start": self.can_start}
+                "players": list(self.players), "status": self.status, "can_start": self.can_start,
+                "disconnected": list(self.disconnected)}
+
+    def _pick_host(self):
+        if self.host not in self.connected and self.connected:
+            self.host = self.connected[0]
 
 
 class Lobby:
@@ -86,15 +96,56 @@ class Lobby:
         if not room.players:
             del self.rooms[room.id]
             return room, True
-        if room.host == username:
-            room.host = room.players[0]
+        if username in room.disconnected:
+            room.disconnected.remove(username)
+        if not room.connected:                 # only disconnected players left: close the room
+            for p in room.players:
+                self.player_room.pop(p, None)
+            del self.rooms[room.id]
+            return room, True
+        room._pick_host()
         return room, False
 
+    def disconnect(self, username):
+        """A player's connection dropped. Returns (room, deleted).
+
+        During a game the seat is kept so the player can log back in and come back;
+        otherwise it is the same as leaving.
+        """
+        room = self.room_of(username)
+        if room is None:
+            raise LobbyError("you are not in a room")
+        if room.status != PLAYING:
+            return self.leave(username)
+        room.disconnected.append(username)
+        if not room.connected:
+            for p in room.players:
+                self.player_room.pop(p, None)
+            del self.rooms[room.id]
+            return room, True
+        room._pick_host()
+        return room, False
+
+    def reconnect(self, username):
+        """The player logged back in: returns their room if a seat is waiting for them."""
+        room = self.room_of(username)
+        if room is not None and username in room.disconnected:
+            room.disconnected.remove(username)
+            return room
+        return None
+
     def finish(self, room_id):
-        """The match is over: the room waits for the host to start a new one."""
+        """The match is over: the room waits for the host to start a new one.
+
+        Players who are still disconnected lose their seat now.
+        """
         room = self.rooms.get(room_id)
         if room:
             room.status = WAITING
+            for p in list(room.disconnected):
+                room.players.remove(p)
+                self.player_room.pop(p, None)
+            room.disconnected = []
         return room
 
     def start(self, username):
@@ -105,7 +156,7 @@ class Lobby:
             raise LobbyError("only the host can start the game")
         if room.status != WAITING:
             raise LobbyError("the game has already started")
-        if len(room.players) < config.MIN_PLAYERS_TO_START:
+        if len(room.connected) < config.MIN_PLAYERS_TO_START:
             raise LobbyError(f"at least {config.MIN_PLAYERS_TO_START} players are needed")
         room.status = PLAYING
         return room

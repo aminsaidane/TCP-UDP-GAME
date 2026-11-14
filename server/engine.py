@@ -47,6 +47,7 @@ class Round:
         self.pending_power = None            # 'J' or 'Q'
         self.power_uses = 0                  # 1 for a single card, 2 for a pair
         self.out = []                        # players disqualified this round (more than 12 cards)
+        self.left = []                       # players who disconnected or left during this round
         self.cut_rank = None                 # rank that may be cut in the open window
         self.last_thrower = None             # whoever threw the last card that stayed in the pile
         self.result = None                   # filled when the round ends
@@ -59,13 +60,15 @@ class Round:
     @property
     def active(self):
         """Players still in the round (not disqualified), in seat order."""
-        return [p for p in self.players if p not in self.out]
+        return [p for p in self.players if p not in self.out and p not in self.left]
 
     def _require(self, pid, *phases, own_turn=True):
         if pid not in self.hands:
             raise GameError("unknown player")
         if pid in self.out:
             raise GameError("you are disqualified")
+        if pid in self.left:
+            raise GameError("you are not playing this round")
         if self.phase not in phases:
             raise GameError(f"not allowed during phase '{self.phase}'")
         if own_turn and pid != self.current_player:
@@ -137,7 +140,7 @@ class Round:
         seat = self.players.index(after_pid)
         while True:
             seat = (seat + 1) % len(self.players)
-            if self.players[seat] not in self.out:
+            if self.players[seat] in self.active:
                 break
         self.current = seat
         self.phase, self.drawn, self.pending_power, self.cut_rank = TURN, None, None, None
@@ -152,7 +155,7 @@ class Round:
             raise GameError(f"choose exactly {config.INITIAL_PEEK} different cards")
         cards = {s: self._card_at(pid, s).code() for s in slots}
         self.peeked.add(pid)
-        if self.peeked == set(self.players):
+        if set(self.active) <= self.peeked:
             self.phase = TURN
         return {"action": "peek", "player": pid, "private": {"cards": cards}}
 
@@ -272,6 +275,66 @@ class Round:
         return {"action": "cut_window_closed", "next": self.current_player}
 
     # ------------------------------------------------------------------ end of round
+    # ------------------------------------------------------------------ disconnections, timeouts
+    def remove_player(self, pid):
+        """A player disconnected or left: out of this round, cards back into the deck, game goes on.
+
+        Unlike a disqualification this costs no points: they score nothing this round.
+        """
+        if pid not in self.hands or pid in self.left or self.phase == ROUND_OVER:
+            raise GameError("this player is not in the round")
+        was_acting = pid == self.current_player and self.phase in (TURN, DRAWN, POWER)
+        cards = [c for c in self.hands[pid] if c is not None]
+        if was_acting and self.drawn is not None:
+            cards.append(self.drawn)           # nobody else saw it: back into the deck
+            self.drawn = None
+        self.deck += cards
+        self.rng.shuffle(self.deck)
+        self.hands[pid] = [None] * len(self.hands[pid])
+        self.left.append(pid)
+        result = {"action": "player_left", "player": pid}
+        if len(self.active) < 2:
+            self._end_round("players_left", winner=self.active[0] if self.active else None)
+        elif self.phase == PEEK:
+            if self.current_player not in self.active:
+                self._advance_seat()
+            if set(self.active) <= self.peeked:
+                self.phase = TURN
+        elif was_acting:
+            self._next_turn(pid)               # a pending Jack/Queen power is simply lost
+        # During a cut window nothing changes: when it closes, play goes to the next
+        # player still in the round (the skip logic in _next_turn).
+        return result
+
+    def _advance_seat(self):
+        seat = self.current
+        while self.players[seat] not in self.active:
+            seat = (seat + 1) % len(self.players)
+        self.current = seat
+
+    def time_out(self):
+        """The server's turn clock ran out: skip whoever the game is waiting for."""
+        phase = self.phase
+        if phase == PEEK:
+            late = [p for p in self.active if p not in self.peeked]
+            self.peeked.update(late)           # they simply don't get to see their cards
+            self.phase = TURN
+            return {"action": "timeout", "phase": phase, "players": late}
+        pid = self.current_player
+        result = {"action": "timeout", "phase": phase, "player": pid}
+        if phase == TURN:
+            self._next_turn(pid)
+        elif phase == DRAWN:                   # the drawn card is thrown, without power or cut
+            card, self.drawn = self.drawn, None
+            self.pile.append(card)
+            result["card"] = card.code()
+            self._next_turn(pid)
+        elif phase == POWER:
+            self._open_cut_window(self.cut_rank)
+        else:
+            raise GameError(f"nothing to time out during phase '{phase}'")
+        return result
+
     def _end_round(self, reason, winner=None, caller=None):
         totals = {p: self.hand_total(p) for p in self.active}
         scores = dict(totals)
@@ -296,6 +359,7 @@ class Round:
             "pablo_correct": pablo_correct, "totals": totals, "scores": scores,
             "hands": {p: [c.code() if c else None for c in self.hands[p]] for p in self.active},
             "disqualified": list(self.out),
+            "left": list(self.left),
         }
 
     # ------------------------------------------------------------------ views
@@ -315,7 +379,8 @@ class Round:
             "power_uses": self.power_uses,
             "disqualified": list(self.out),
             "cut_rank": self.cut_rank,
-            "waiting_peek": [p for p in self.players if p not in self.peeked],
+            "waiting_peek": [p for p in self.active if p not in self.peeked],
+            "left": list(self.left),
             "result": self.result,
         }
 
@@ -340,14 +405,19 @@ class Match:
         self.round_number = 0
         self.round = None
         self.history = []
+        self.ended_early = False
 
-    def start_round(self, deck=None):
+    def start_round(self, deck=None, players=None):
+        """Deals a round to `players` (default: everyone). Players who are away sit it out."""
         if self.is_over:
             raise GameError("the match is over")
         if self.round and self.round.phase != ROUND_OVER:
             raise GameError("the current round is not finished")
+        seats = [p for p in self.players if players is None or p in players]
+        if len(seats) < 2:
+            raise GameError("not enough players")
         # The first player rotates every round.
-        self.round = Round(self.players, starter=self.round_number, rng=self.rng, deck=deck)
+        self.round = Round(seats, starter=self.round_number, rng=self.rng, deck=deck)
         self.round_number += 1
         return self.round
 
@@ -364,7 +434,11 @@ class Match:
 
     @property
     def is_over(self):
-        return any(s >= config.TARGET_SCORE for s in self.scores.values())
+        return self.ended_early or any(s >= config.TARGET_SCORE for s in self.scores.values())
+
+    def end_early(self):
+        """Not enough players left to go on: the match ends with the current scores."""
+        self.ended_early = True
 
     def winners(self):
         """Lowest total score wins (a list, in case of a tie)."""

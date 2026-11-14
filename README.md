@@ -64,6 +64,8 @@ Click **Register** the first time (it creates the account and logs you in), **Lo
 | Your turn, you think your hand is the lowest | **Pablo!** then **Confirm Pablo** (a wrong call costs +50) |
 | Cut window (3 s after any throw, anyone) | click one of **your** cards with the same number as the pile. Wrong = penalty card |
 
+If your connection drops during a game, just log in again: you watch the rest of the round and are dealt in at the next one. A player who does nothing for 60 seconds on their turn is skipped.
+
 After each round everyone's cards are revealed with the scores; the host clicks **Next round**. The match ends when someone reaches 100 points (lowest total wins), and the room is ready for a new match.
 
 ## Tests

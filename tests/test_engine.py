@@ -313,6 +313,58 @@ class DisqualificationTests(unittest.TestCase):
         self.assertEqual(m.start_round().players, [A, B, C])   # A plays again
 
 
+class LeaveAndTimeoutTests(unittest.TestCase):
+    def test_leaver_scores_nothing_and_cards_return(self):
+        r = make_round({A: ["5H", "6H"], B: ["1D"], C: ["7H"]}, deck=["2S"])
+        r.remove_player(C)
+        self.assertEqual(r.active, [A, B])
+        self.assertEqual(len(r.deck), 2)
+        r.call_pablo(A)
+        self.assertEqual(r.result["scores"], {A: 11 + 50, B: -5})   # C is not scored at all
+        self.assertEqual(r.result["left"], [C])
+
+    def test_leaving_on_your_turn_with_a_drawn_card(self):
+        r = make_round({A: ["5H"], B: ["1D"], C: ["7H"]}, deck=["2S", "3S"])
+        r.draw(A)
+        r.remove_player(A)
+        self.assertEqual((r.phase, r.current_player, r.drawn), (TURN, B, None))
+        self.assertEqual(len(r.deck), 3)                             # 2S + 3S... + A's 5H
+
+    def test_last_one_standing(self):
+        r = make_round({A: ["5H"], B: ["1D"], C: ["7H"]})
+        r.remove_player(B)
+        r.remove_player(C)
+        self.assertEqual((r.phase, r.result["reason"], r.result["winner"]), (ROUND_OVER, "players_left", A))
+
+    def test_leaver_cannot_act(self):
+        r = make_round({A: ["5H"], B: ["1D"], C: ["7H"]})
+        r.remove_player(B)
+        with self.assertRaises(GameError):
+            r.peek(B, [0, 1])
+
+    def test_timeout_skips_turn_and_throws_drawn_card(self):
+        r = make_round({A: ["5H"], B: ["1D"], C: ["7H"]}, deck=["2S", "JS"])
+        self.assertEqual(r.time_out()["phase"], TURN)
+        self.assertEqual(r.current_player, B)
+        r.draw(B)
+        res = r.time_out()
+        self.assertEqual((res["phase"], res["card"]), (DRAWN, "JS"))   # thrown, no power, no cut
+        self.assertEqual((r.phase, r.current_player), (TURN, C))
+
+    def test_timeout_during_peek(self):
+        r = Round([A, B, C], rng=random.Random(1))
+        r.peek(A, [0, 1])
+        self.assertEqual(r.time_out()["players"], [B, C])
+        self.assertEqual(r.phase, TURN)
+
+    def test_match_round_with_missing_player(self):
+        m = Match([A, B, C])
+        r = m.start_round(players=[A, C])
+        self.assertEqual(r.players, [A, C])
+        with self.assertRaises(GameError):
+            Match([A, B]).start_round(players=[A])
+
+
 class EndOfRoundTests(unittest.TestCase):
     def test_empty_hand_by_pair_wins(self):
         r = make_round({A: ["3H", "3S"], B: ["2D", "JD"], C: ["KH"]})

@@ -16,7 +16,7 @@ from datetime import datetime
 
 from common import config
 from common import protocol as proto
-from server.engine import CUT_WINDOW, ROUND_OVER, GameError, Match
+from server.engine import CUT_WINDOW, DRAWN, PEEK, POWER, ROUND_OVER, TURN, GameError, Match
 
 log = logging.getLogger("pablo")
 
@@ -36,12 +36,17 @@ ACTIONS = {
 
 
 class GameRoom:
-    def __init__(self, room_id, players, lock, deliver, rng=None, on_finished=None):
+    def __init__(self, room_id, players, lock, deliver, rng=None, on_finished=None, viewers=None):
         """`lock` is the server lock; `deliver(outbox)` queues messages (called with the lock held).
 
-        `on_finished()` is called (lock held) if the match ends from the timer thread.
+        `on_finished()` is called (lock held) if the match ends from a timer thread.
+        `viewers()` returns who receives the game messages: the room's connected players,
+        including someone who reconnected and is watching until the next round.
         """
         self.on_finished = on_finished
+        self.viewers = viewers or (lambda: list(self.match.players))
+        self.turn_deadline = None     # time.monotonic() when the player we wait for times out
+        self._turn_key = None
         self.room_id = room_id
         self.match = Match(players, rng=rng)
         self.lock = lock
@@ -56,7 +61,8 @@ class GameRoom:
 
     @property
     def players(self):
-        return self.match.players
+        """Who receives game messages right now."""
+        return self.viewers()
 
     # ------------------------------------------------------------------ messages
     def _state_for(self, player):
@@ -65,7 +71,14 @@ class GameRoom:
         state["scores"] = dict(self.match.scores)
         state["cut_remaining"] = (max(0.0, self.cut_deadline - time.monotonic())
                                   if self.cut_deadline else None)
+        state["turn_remaining"] = (max(0.0, self.turn_deadline - time.monotonic())
+                                   if self.turn_deadline else None)
+        state["watching"] = self._watching(player)
         return proto.make("state", state=state)
+
+    def _watching(self, player):
+        """Not dealt in this round, or dropped out of it: only watching."""
+        return player not in self.round.players or player in self.round.left
 
     def states(self):
         return [(p, self._state_for(p)) for p in self.players]
@@ -80,11 +93,75 @@ class GameRoom:
         return out
 
     # ------------------------------------------------------------------ flow
-    def start(self):
-        self.match.start_round()
-        start = proto.make("game_start", players=self.players, scores=dict(self.match.scores),
-                           round=self.match.round_number)
-        return [(p, start) for p in self.players] + self.states()
+    def _game_start(self, player):
+        return proto.make("game_start", players=self.round.players, scores=dict(self.match.scores),
+                          round=self.match.round_number, watching=self._watching(player))
+
+    def start(self, present=None):
+        """Deals a round to the players who are here (`present`, default: everyone)."""
+        self.match.start_round(players=present)
+        self._touch()
+        return [(p, self._game_start(p)) for p in self.players] + self.states()
+
+    def watch(self, player):
+        """A player logged back in mid-round: they watch until the next round."""
+        out = [(player, self._game_start(player)), (player, self._state_for(player))]
+        if self.round.phase == ROUND_OVER and self.match.history:
+            out.append((player, self._round_over_msg()))
+        return out
+
+    def player_left(self, player, reason):
+        """A player disconnected (or left the room): the round goes on without them."""
+        notice = proto.make("player_left", username=player, reason=reason)
+        out = [(p, notice) for p in self.players if p != player]
+        if self.round.phase == ROUND_OVER or player not in self.round.active:
+            return out
+        result = self.round.remove_player(player)
+        log.info("room %d: %s removed from round %d (%s)", self.room_id, player, self.match.round_number, reason)
+        out += self.events(result, None)
+        if self.round.phase != CUT_WINDOW:
+            self.stop()                                # (a cut window still closes normally)
+        self._touch()
+        return out + self.states() + self._check_round_over()
+
+    def check_alone(self):
+        """Fewer than 2 connected players: the match cannot go on."""
+        if self.finished or len(self.players) >= 2:
+            return []
+        if self.round.phase != ROUND_OVER:
+            return []          # the engine ends the round itself when one player is left in it
+        self.match.end_early()
+        self.finished = True
+        winners = self.match.winners()
+        log.info("room %d: not enough players, MATCH OVER, winner(s) %s", self.room_id, ", ".join(winners))
+        over = proto.make("match_over", scores=dict(self.match.scores), winners=winners,
+                          rounds=self.match.round_number)
+        return [(p, over) for p in self.players]
+
+    # ------------------------------------------------------------------ turn clock
+    def _touch(self):
+        """(Re)starts the turn clock whenever the game starts waiting for someone new."""
+        r = self.round
+        if r.phase in (PEEK, TURN, DRAWN, POWER):
+            key = (self.match.round_number, r.phase, r.current, frozenset(r.peeked))
+            if key != self._turn_key:
+                self._turn_key = key
+                self.turn_deadline = time.monotonic() + config.TURN_TIMEOUT_SECONDS
+        else:
+            self._turn_key = self.turn_deadline = None
+
+    def check_timeout(self, now):
+        """Called every second by the server: skips a player who has been idle too long."""
+        if self.turn_deadline is None or now < self.turn_deadline:
+            return []
+        result = self.round.time_out()
+        who = result.get("player") or ", ".join(result.get("players", []))
+        log.info("room %d: %s timed out (%s) -> skipped", self.room_id, who, result["phase"])
+        self._turn_key = None
+        out = self.events(result, None)
+        self._check_cut_window()
+        self._touch()
+        return out + self.states() + self._check_round_over()
 
     def act(self, player, msg):
         """Applies one player action. Illegal moves get an error and change nothing."""
@@ -103,6 +180,7 @@ class GameRoom:
             log.info("room %d: %s called PABLO", self.room_id, player)
         outbox = self.events(result, player)
         self._check_cut_window()
+        self._touch()
         return outbox + self.states() + self._check_round_over()
 
     def _check_round_over(self):
@@ -111,12 +189,13 @@ class GameRoom:
             return []
         self.stop()                                   # no cut window can still be running
         self.match.record_round()
+        if not self.match.is_over and len(self.players) < 2:
+            self.match.end_early()                    # not enough connected players to go on
         result = self.round.result
         log.info("room %d: round %d over (%s), winner %s, round scores %s, totals %s",
                  self.room_id, self.match.round_number, result["reason"], result["winner"],
                  result["scores"], self.match.scores)
-        msg = proto.make("round_over", round=self.match.round_number, result=result,
-                         scores=dict(self.match.scores), match_over=self.match.is_over)
+        msg = self._round_over_msg()
         outbox = [(p, msg) for p in self.players]
         if self.match.is_over:
             self.finished = True
@@ -127,13 +206,17 @@ class GameRoom:
             outbox += [(p, over) for p in self.players]
         return outbox
 
-    def next_round(self):
-        """Deals the next round (the server checks that the host asked and the round is over)."""
+    def _round_over_msg(self):
+        return proto.make("round_over", round=self.match.round_number, result=self.round.result,
+                          scores=dict(self.match.scores), match_over=self.match.is_over)
+
+    def next_round(self, present):
+        """Deals the next round to the players who are here (the server checks host and phase)."""
         if self.finished:
             raise GameError("the match is over")
         if self.round.phase != ROUND_OVER:
             raise GameError("the round is not finished")
-        return self.start()
+        return self.start(present)
 
     def _check_cut_window(self):
         """Starts the 3-second timer when the engine has just opened a cut window."""
@@ -150,6 +233,7 @@ class GameRoom:
             if self.round.phase != CUT_WINDOW:
                 return                     # the round ended meanwhile
             result = self.round.close_cut_window()
+            self._touch()
             self.deliver(self.events(result, None) + self.states() + self._check_round_over())
             if self.finished and self.on_finished:
                 self.on_finished()
@@ -158,3 +242,4 @@ class GameRoom:
         if self.cut_timer:
             self.cut_timer.cancel()
             self.cut_timer = None
+        self.cut_deadline = None

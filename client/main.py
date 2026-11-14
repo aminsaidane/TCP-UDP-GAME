@@ -358,10 +358,7 @@ class App:
             self.go("room")
         elif kind == "room_update":
             self.room = msg["room"]
-            table = self.screens["table"]
-            if self.screen is table and table.state and len(msg["room"]["players"]) < len(
-                    table.state["players"]):
-                self.screen.show("A player left the room (handled in Step 10)")
+
         elif kind == "room_left":
             self.room = None
             self.screens["table"].state = None
@@ -373,6 +370,8 @@ class App:
             self.screens["table"].on_state(msg["state"])
         elif kind == "event":
             self.screens["table"].on_event(msg["event"])
+        elif kind == "player_left":
+            self.screens["table"].on_player_left(msg)
         elif kind == "round_over":
             self.screens["table"].on_round_over(msg)
         elif kind == "match_over":

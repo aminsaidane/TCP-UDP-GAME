@@ -13,6 +13,7 @@ import queue
 import secrets
 import socket
 import threading
+import time
 
 from common import config
 from common import protocol as proto
@@ -109,6 +110,7 @@ class PabloServer:
         log.info("TCP server listening on %s:%d", self.host, self.port)
         self.udp = UdpService(self, self.host, self.udp_port, self.discovery_port)
         self.udp.start()
+        threading.Thread(target=self._monitor_loop, name="monitor", daemon=True).start()
 
     def stop(self):
         self.running = False
@@ -121,6 +123,27 @@ class PabloServer:
         for s in sessions:
             s.close()
         log.info("server stopped")
+
+    def _monitor_loop(self):
+        """Twice a second: drop clients whose UDP heartbeats stopped, skip idle players."""
+        while self.running:
+            time.sleep(0.5)
+            now = time.monotonic()
+            silent = []
+            with self.lock:
+                for session in self.sessions.values():
+                    # Only clients whose UDP works are checked: if a firewall blocks UDP,
+                    # last_heartbeat stays None and TCP alone decides.
+                    if session.last_heartbeat and now - session.last_heartbeat > config.HEARTBEAT_TIMEOUT:
+                        silent.append(session)
+                        session.last_heartbeat = None
+                for room_id, game in list(self.games.items()):
+                    self._deliver_named(game.check_timeout(now))
+                    if game.finished:
+                        self._end_match(self.lobby.rooms[room_id])
+            for session in silent:
+                log.warning("%s: no heartbeat for %.0f s -> disconnecting", session, config.HEARTBEAT_TIMEOUT)
+                session.conn.close()      # its reader thread wakes up and cleans up as usual
 
     def _accept_loop(self):
         while self.running:
@@ -186,7 +209,7 @@ class PabloServer:
                 if self.sessions.get(session.username) is session:
                     del self.sessions[session.username]
                     if self.lobby.room_of(session.username):
-                        outbox = self._leave_room(session.username)
+                        outbox = self._leave_room(session.username, disconnected=True)
                     self._deliver(outbox)
             log.info("%s disconnected", session)
         else:
@@ -219,9 +242,16 @@ class PabloServer:
             session.username = username
             session.token = secrets.token_hex(16)   # identifies this player's UDP packets later
             self.sessions[username] = session
-        log.info("%s logged in as '%s'", session.addr, username)
-        session.send(proto.make("login_ok", username=username, token=session.token,
-                                udp_port=self.udp.port))
+            log.info("%s logged in as '%s'", session.addr, username)
+            session.send(proto.make("login_ok", username=username, token=session.token,
+                                    udp_port=self.udp.port))
+            # Back after a disconnection during a game? Rejoin the room as a watcher.
+            room = self.lobby.reconnect(username)
+            if room and room.id in self.games:
+                log.info("'%s' reconnected to room %d: watching until the next round", username, room.id)
+                session.send(proto.make("room_joined", room=room.to_dict()))
+                self._deliver(self._room_update(room, exclude=username))
+                self._deliver_named(self.games[room.id].watch(username))
 
     def on_logout(self, session, msg):
         log.info("%s logged out", session)
@@ -260,10 +290,28 @@ class PabloServer:
         msg = proto.make("room_update", room=room.to_dict())
         return [(s, msg) for s in self._room_sessions(room, exclude)]
 
-    def _leave_room(self, username):
-        room, deleted = self.lobby.leave(username)
-        log.info("'%s' left room %d '%s'%s", username, room.id, room.name,
-                 " (room closed)" if deleted else "")
+    def _leave_room(self, username, disconnected=False):
+        """Removes a player from their room (or keeps their seat if they dropped mid-game).
+
+        If a game is running, it goes on without them.
+        """
+        room = self.lobby.room_of(username)
+        game = self.games.get(room.id) if room else None
+        if disconnected:
+            room, deleted = self.lobby.disconnect(username)
+        else:
+            room, deleted = self.lobby.leave(username)
+        if game and not deleted and not game.finished:
+            reason = "disconnected" if disconnected else "left"
+            self._deliver_named(game.player_left(username, reason))
+        log.info("'%s' %s room %d '%s'%s", username,
+                 "dropped from" if disconnected and not deleted and room.status == "playing" else "left",
+                 room.id, room.name, " (room closed)" if deleted else "")
+        if game and not deleted and not game.finished:
+            self._deliver_named(game.check_alone())          # one player left: the match ends
+        if game and game.finished and room.id in self.games and not deleted:
+            self._end_match(room)
+            return []
         if deleted and room.id in self.games:
             self.games.pop(room.id).stop()
         outbox = [] if deleted else self._room_update(room)
@@ -322,12 +370,13 @@ class PabloServer:
                 log.info("'%s' started the game in room %d '%s' with %s",
                          session.username, room.id, room.name, ", ".join(room.players))
                 outbox = self._room_update(room) + self._rooms_broadcast()
-                game = GameRoom(room.id, room.players, self.lock, self._deliver_named,
-                                on_finished=lambda r=room: self._end_match(r))
+                game = GameRoom(room.id, room.connected, self.lock, self._deliver_named,
+                                on_finished=lambda r=room: self._end_match(r),
+                                viewers=lambda r=room: r.connected)
                 self.games[room.id] = game
                 self._deliver(outbox)
                 outbox = []
-                self._deliver_named(game.start())
+                self._deliver_named(game.start(room.connected))
             self._deliver(outbox)
 
     # ------------------------------------------------------------------ game handler
@@ -344,7 +393,10 @@ class PabloServer:
 
     def _end_match(self, room):
         """Match over: the room goes back to 'waiting' so the same players can play again."""
-        self.games.pop(room.id).stop()
+        game = self.games.pop(room.id, None)
+        if game is None:
+            return
+        game.stop()
         self.lobby.finish(room.id)
         self._deliver(self._room_update(room) + self._rooms_broadcast())
 
@@ -358,7 +410,7 @@ class PabloServer:
                 session.send(proto.error("next_round", "only the host can start the next round"))
             else:
                 try:
-                    self._deliver_named(game.next_round())
+                    self._deliver_named(game.next_round(room.connected))
                     log.info("room %d: round %d dealt", room.id, game.match.round_number)
                 except GameError as exc:
                     session.send(proto.error("next_round", str(exc)))
