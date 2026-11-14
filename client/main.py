@@ -16,6 +16,7 @@ from common import protocol as proto
 from client import ui
 from client.network import NetworkClient, parse_address
 from client.table import TableScreen
+from client.udp import UdpClient, discover
 
 WIDTH, HEIGHT = 1000, 680
 FPS = 30
@@ -58,17 +59,33 @@ class LoginScreen(Screen):
     def __init__(self, app):
         super().__init__(app)
         x = WIDTH // 2 - 170
-        self.server = ui.TextInput((x, 250, 340, 44), "server IP", max_len=40, value=app.server_address)
+        self.server = ui.TextInput((x, 250, 230, 44), "server IP", max_len=40, value=app.server_address)
+        self.find_btn = ui.Button((x + 240, 250, 100, 44), "Find", self.find, kind="secondary")
         self.username = ui.TextInput((x, 330, 340, 44), "username", max_len=16)
         self.password = ui.TextInput((x, 410, 340, 44), "password", password=True, max_len=32)
         self.username.focused = True
         self.inputs = [self.server, self.username, self.password]
         self.login_btn = ui.Button((x, 482, 165, 48), "Log in", self.login)
         self.register_btn = ui.Button((x + 175, 482, 165, 48), "Register", self.register, kind="secondary")
-        self.buttons = [self.login_btn, self.register_btn]
+        self.buttons = [self.login_btn, self.register_btn, self.find_btn]
 
     def submit(self):
         self.login()
+
+    def find(self):
+        """LAN discovery: a UDP broadcast asks every PC on the network for a Pablo server."""
+        discover(self.app.net.inbox)
+        self.show("Searching the local network (UDP broadcast)...", ok=True)
+
+    def on_discovered(self, servers):
+        if not servers:
+            self.show("No server answered. Type its IP address instead.")
+            return
+        s = servers[0]
+        port = "" if s["tcp_port"] == config.TCP_PORT else f":{s['tcp_port']}"
+        self.server.value = s["host"] + port
+        more = f" ({len(servers)} found)" if len(servers) > 1 else ""
+        self.show(f"Found server '{s['name']}' at {s['host']}{more}", ok=True)
 
     def _credentials(self):
         user, pw = self.username.value.strip(), self.password.value
@@ -271,6 +288,7 @@ class RoomScreen(Screen):
 class App:
     def __init__(self, server_address=""):
         self.net = NetworkClient()
+        self.udp = UdpClient(self.net.inbox)
         self.server_address = server_address or config.SERVER_HOST
         self.username = None
         self.token = None
@@ -302,6 +320,7 @@ class App:
     def logout(self):
         self.net.send(proto.make("logout"))
         self.net.close()
+        self.udp.stop()
         self.username = self.room = None
         self.rooms = []
         self.go("login")
@@ -313,6 +332,7 @@ class App:
             self.screens["login"].show(msg["message"])
         elif kind == "_disconnected":
             self.net.close()
+            self.udp.stop()
             self.username = self.room = None
             self.go("login")
             self.screen.show("Lost the connection to the server")
@@ -321,8 +341,15 @@ class App:
                 user, pw = self.pending_login
                 self.pending_login = None
                 self.net.send(proto.make("login", username=user, password=pw))
+        elif kind == "_discovered":
+            self.screens["login"].on_discovered(msg["servers"])
+        elif kind == "timer":
+            self.screens["table"].on_timer(msg)
+        elif kind == "hover":
+            self.screens["table"].on_hover(msg)
         elif kind == "login_ok":
             self.username, self.token = msg["username"], msg["token"]
+            self.udp.start(self.net.host, msg["udp_port"], msg["token"])
             self.go("lobby")
         elif kind == "rooms":
             self.rooms = msg["rooms"]
@@ -389,6 +416,7 @@ def main():
         clock.tick(FPS)
     app.net.send(proto.make("logout"))
     app.net.close()
+    app.udp.stop()
     pygame.quit()
 
 

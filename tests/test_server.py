@@ -59,7 +59,7 @@ class ServerTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.users_file = os.path.join(self.tmp.name, "users.json")
-        self.server = PabloServer("127.0.0.1", 0, self.users_file)   # port 0 = any free port
+        self.server = PabloServer("127.0.0.1", 0, self.users_file, udp_port=0, discovery_port=0)   # port 0 = any free port
         self.server.start()
         self.clients = []
 
@@ -89,7 +89,7 @@ class AccountTests(ServerTestCase):
         reply = c.request("login", username="amin", password="secret")
         self.assertEqual(reply["type"], "login_ok")
         self.assertEqual(len(reply["token"]), 32)
-        self.assertEqual(reply["udp_port"], 5001)
+        self.assertEqual(reply["udp_port"], self.server.udp.port)
 
     def test_password_is_not_stored(self):
         self.client().request("register", username="amin", password="supersecret")
@@ -101,7 +101,7 @@ class AccountTests(ServerTestCase):
     def test_accounts_survive_restart(self):
         self.client().request("register", username="amin", password="secret")
         self.server.stop()
-        self.server = PabloServer("127.0.0.1", 0, self.users_file)
+        self.server = PabloServer("127.0.0.1", 0, self.users_file, udp_port=0, discovery_port=0)
         self.server.start()
         self.assertEqual(self.client().request("login", username="amin", password="secret")["type"], "login_ok")
 

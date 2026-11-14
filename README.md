@@ -35,6 +35,8 @@ It listens on every network interface, TCP port 5000, and prints a log line for 
 | Option | Default | Purpose |
 |---|---|---|
 | `--port` | `5000` | TCP port |
+| `--udp-port` | `5001` | UDP port (heartbeats, hover, timer ticks) |
+| `--discovery-port` | `5002` | UDP port answering LAN discovery broadcasts |
 | `--users-file` | `users.json` | where accounts are saved (passwords are stored as salted hashes) |
 
 ### Client
@@ -42,11 +44,13 @@ It listens on every network interface, TCP port 5000, and prints a log line for 
 On each player PC (needs pygame: `pip install -r requirements.txt`):
 
 ```bash
-python -m client.main                         # then type the server IP in the login screen
+python -m client.main                         # then click Find (LAN discovery) or type the server IP
 python -m client.main --server 192.168.1.12   # or pre-fill it
 ```
 
 Click **Register** the first time (it creates the account and logs you in), **Log in** afterwards. In the lobby, create a room (3 or 4 players) or join one; the host starts the game once at least 3 players are in.
+
+**Firewall:** the first time, Windows asks whether Python may use the network: allow it on **private networks** on every PC, or UDP (discovery, heartbeats, hover, timers) will be blocked. The game still works over TCP alone; only the UDP extras disappear.
 
 ### Controls at the table
 

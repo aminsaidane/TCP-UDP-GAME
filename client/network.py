@@ -34,6 +34,7 @@ class NetworkClient:
     def __init__(self):
         self.inbox = queue.Queue()
         self.conn = None
+        self.host = None               # server address (the UDP socket sends there too)
         self._closing = False
 
     @property
@@ -42,6 +43,7 @@ class NetworkClient:
 
     def connect(self, host, port, first_message=None):
         """Connects in the background, then sends `first_message` (e.g. a login)."""
+        self.host = host
         def run():
             try:
                 sock = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)

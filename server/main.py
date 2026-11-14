@@ -20,6 +20,7 @@ from server.accounts import AccountError, AccountStore
 from server.engine import GameError
 from server.game import ACTIONS, GameRoom
 from server.lobby import Lobby, LobbyError
+from server.udp import UdpService
 
 log = logging.getLogger("pablo")
 
@@ -42,6 +43,8 @@ class Session:
         self.username = None
         self.token = None
         self.bad_messages = 0
+        self.udp_addr = None          # learnt from the client's first UDP packet
+        self.last_heartbeat = None    # time.monotonic() of the last UDP packet
         self.outgoing = queue.Queue()
         self.writer = threading.Thread(target=self._write_loop, name=f"writer-{self.addr}", daemon=True)
         self.writer.start()
@@ -70,8 +73,11 @@ class Session:
 
 
 class PabloServer:
-    def __init__(self, host=config.SERVER_BIND, port=config.TCP_PORT, users_file="users.json"):
+    def __init__(self, host=config.SERVER_BIND, port=config.TCP_PORT, users_file="users.json",
+                 udp_port=config.UDP_PORT, discovery_port=config.DISCOVERY_PORT):
         self.host, self.port = host, port
+        self.udp_port, self.discovery_port = udp_port, discovery_port
+        self.udp = None
         self.accounts = AccountStore(users_file)
         self.sessions = {}                  # username -> Session (logged-in players only)
         self.lobby = Lobby()
@@ -101,11 +107,15 @@ class PabloServer:
         self.running = True
         threading.Thread(target=self._accept_loop, name="accept", daemon=True).start()
         log.info("TCP server listening on %s:%d", self.host, self.port)
+        self.udp = UdpService(self, self.host, self.udp_port, self.discovery_port)
+        self.udp.start()
 
     def stop(self):
         self.running = False
         if self.listener:
             self.listener.close()
+        if self.udp:
+            self.udp.stop()
         with self.lock:
             sessions = list(self.sessions.values())
         for s in sessions:
@@ -211,7 +221,7 @@ class PabloServer:
             self.sessions[username] = session
         log.info("%s logged in as '%s'", session.addr, username)
         session.send(proto.make("login_ok", username=username, token=session.token,
-                                udp_port=config.UDP_PORT))
+                                udp_port=self.udp.port))
 
     def on_logout(self, session, msg):
         log.info("%s logged out", session)
@@ -358,11 +368,14 @@ def main():
     parser = argparse.ArgumentParser(description="Pablo game server")
     parser.add_argument("--host", default=config.SERVER_BIND, help="address to listen on")
     parser.add_argument("--port", type=int, default=config.TCP_PORT, help="TCP port")
+    parser.add_argument("--udp-port", type=int, default=config.UDP_PORT, help="UDP game port")
+    parser.add_argument("--discovery-port", type=int, default=config.DISCOVERY_PORT,
+                        help="UDP port answering LAN discovery broadcasts")
     parser.add_argument("--users-file", default="users.json", help="where accounts are saved")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
-    server = PabloServer(args.host, args.port, args.users_file)
+    server = PabloServer(args.host, args.port, args.users_file, args.udp_port, args.discovery_port)
     server.start()
     try:
         threading.Event().wait()   # sleep until Ctrl+C

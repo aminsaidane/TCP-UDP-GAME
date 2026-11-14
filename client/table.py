@@ -20,6 +20,7 @@ MY_CARD = (84, 118)
 OPP_CARD = (46, 64)
 POWER_NAMES = {"J": "Jack", "Q": "Queen"}
 LOG_FONT, LOG_WIDTH, LOG_ROWS = 20, 266, 7
+HOVER_COLOURS = [(64, 156, 255), (236, 112, 40), (170, 90, 220), (40, 190, 170)]
 
 
 class TableScreen:
@@ -33,6 +34,9 @@ class TableScreen:
         self.pair_mode = False
         self.card_rects = []            # (rect, owner, slot), rebuilt every frame
         self.pile_flash = (0.0, None)   # (until, colour): the pile glows after each cut
+        self.udp_timer = None           # (remaining, received at) from the last UDP timer tick
+        self.hovers = {}                # player -> (owner, slot, until): cards others point at (UDP)
+        self.my_hover = None            # the card under my mouse, last sent over UDP
         self.message = ""
         self.message_ok = False
         y = 600
@@ -107,6 +111,27 @@ class TableScreen:
         self.state = None
         self.pair_mode = False
         self._say(f"Round {msg['round']} starts: pick 2 cards to peek at")
+
+    def on_timer(self, msg):
+        if msg["kind"] == "cut":
+            self.udp_timer = (msg["remaining"], time.monotonic())
+
+    def on_hover(self, msg):
+        if msg["slot"] is None:
+            self.hovers.pop(msg["player"], None)
+        else:
+            self.hovers[msg["player"]] = (msg["target"], msg["slot"], time.monotonic() + 2.0)
+
+    def _send_hover(self):
+        """Tells the others (over UDP) which card my mouse is on, only when it changes."""
+        if not self.app.udp.active or not self.state:
+            return
+        pos = ui.mouse_pos()
+        hit = next(((o, s) for r, o, s in self.card_rects if r.collidepoint(pos)), None)
+        if hit != self.my_hover:
+            self.my_hover = hit
+            target, slot = hit if hit else (self.me, None)
+            self.app.udp.send("hover", target=target, slot=slot)
 
     def on_round_over(self, msg):
         self.round_result = msg
@@ -255,9 +280,19 @@ class TableScreen:
         return ""
 
     def cut_left(self):
-        """Seconds left in the cut window, counted down locally from the last state."""
+        """Seconds left in the cut window.
+
+        Uses the server's UDP timer ticks when they are arriving (5 per second);
+        if UDP is blocked or lost, counts down locally from the last TCP state.
+        """
+        now = time.monotonic()
+        if self.udp_timer and now - self.udp_timer[1] < 0.6:
+            return max(0.0, self.udp_timer[0] - (now - self.udp_timer[1]))
         s = self.state
-        return max(0.0, (s["cut_remaining"] or 0) - (time.monotonic() - self.state_time))
+        return max(0.0, (s["cut_remaining"] or 0) - (now - self.state_time))
+
+    def timer_source(self):
+        return "UDP" if self.udp_timer and time.monotonic() - self.udp_timer[1] < 0.6 else "local"
 
     def _card_shown(self, owner, slot):
         hit = self.reveals.get((owner, slot))
@@ -281,6 +316,16 @@ class TableScreen:
             ui.draw_card(surface, rect, self._card_shown(owner, i), selected=selected,
                          glow=ui.WHITE if hover else None)
             self.card_rects.append((rect, owner, i))
+            # other players pointing at this card (UDP hover)
+            now = time.monotonic()
+            for k, (player, (t_owner, t_slot, until)) in enumerate(sorted(self.hovers.items())):
+                if t_owner == owner and t_slot == i and until > now:
+                    colour = HOVER_COLOURS[self.state["players"].index(player) % len(HOVER_COLOURS)]
+                    pygame.draw.rect(surface, colour, rect.inflate(10, 10), width=3, border_radius=8)
+                    tag = ui.font(18, True).render(player, True, ui.WHITE)
+                    box = tag.get_rect(midbottom=(rect.centerx, rect.y - 6 - k * 18)).inflate(8, 2)
+                    pygame.draw.rect(surface, colour, box, border_radius=5)
+                    surface.blit(tag, tag.get_rect(center=box.center))
 
     def _clickable(self, owner):
         """Whether clicking this player's cards does something right now."""
@@ -367,6 +412,8 @@ class TableScreen:
             part = bar.copy()
             part.w = int(bar.w * min(1.0, self.cut_left() / config.CUT_WINDOW_SECONDS))
             pygame.draw.rect(surface, ui.BRASS, part, border_radius=4)
+            ui.text(surface, f"timer: {self.timer_source()}", (bar.right + 8, bar.y - 5), size=18,
+                    color=ui.PAPER_DARK)
 
         # ---- status banner
         ui.text(surface, self.status(), (WIDTH // 2, 394), size=28, color=ui.WHITE, bold=True, center=True)
@@ -399,6 +446,7 @@ class TableScreen:
         self.skip_btn.visible = turn and phase == "power"
         for b in self.buttons:
             b.draw(surface)
+        self._send_hover()
 
     # ------------------------------------------------------------------ results
     def headline(self, result):

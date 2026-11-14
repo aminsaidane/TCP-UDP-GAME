@@ -43,7 +43,8 @@ class ParseAddressTests(unittest.TestCase):
 class LiveServerCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.server = PabloServer("127.0.0.1", 0, os.path.join(self.tmp.name, "users.json"))
+        self.server = PabloServer("127.0.0.1", 0, os.path.join(self.tmp.name, "users.json"),
+                                  udp_port=0, discovery_port=0)
         self.server.start()
         self.address = f"127.0.0.1:{self.server.port}"
 
